@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "labelstudio-tools"
+version = "0.1.0"
+description = "Advanced Labelstudio API toolkit"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Sidney Batchelder",
+    email = "sbatchelder@whoi.edu" },
+]
+
+dependencies = [
+    "label-studio-sdk~=2.0.17",
+    "requests",
+    "tqdm",
+    "boto3",
+    "botocore",
+]
+
+keywords = ["labelstudio"]
+classifiers = [
+      "Programming Language :: Python :: 3",
+      "License :: OSI Approved :: MIT License",
+      "Operating System :: OS Independent"
+    ]
+
+[project.urls]
+Homepage = "https://github.com/WHOIGit/labelstudio-tools"
+Issues = "https://github.com/WHOIGit/labelstudio-tools/issues"
+
+[project.optional-dependencies]
+#dev = ["pytest", "ruff"]
+
+
+# If using src layout:
+[tool.hatch.build.targets.wheel]
+packages = ["src/labelstudio_tools"]
