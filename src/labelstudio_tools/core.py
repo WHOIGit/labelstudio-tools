@@ -13,9 +13,9 @@ from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.types import View
 from label_studio_sdk.data_manager import Filters, Column, Type, Operator
 
-from labelstudio_tools.utils import read_token, parse_task_filter, attr_list_decorator, \
+from .utils import read_token, parse_task_filter, attr_list_decorator, \
     s3_client_and_bucket, s3_object_exists, s3_url_to_bucket_and_key, estimate_chunks
-from labelstudio_tools.utils import chunk_my_dict
+from .utils import chunk_my_dict
 
 
 class LabelStudioPlus:
