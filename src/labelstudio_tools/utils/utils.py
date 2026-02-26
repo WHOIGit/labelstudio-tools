@@ -12,7 +12,7 @@ def read_token(token_path):
 
 def attr_list_decorator(func):
     @wraps(func)
-    def wrapper(self, attrs=None, *args, **kwargs):
+    def wrapper(self, *args, attrs=None, **kwargs):
         items = func(self, *args, **kwargs)   # pass self (and any args)
         if attrs is None:
             return items

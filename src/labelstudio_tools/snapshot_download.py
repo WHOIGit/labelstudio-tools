@@ -99,13 +99,16 @@ class SnapshotManager:
 
         self.snap = snap
 
+    def is_snap_ready(self):
+        self.snap = self.get_snapshot(self.snap.id)
+        return self.snap.status == "completed"
 
-    def wait_for_snapshot_completion(self):
+    def wait_for_snapshot_completion(self, sleep_cycle_seconds=10):
         # Wait for snapshot to complete
         while self.snap.status in ["created", "in_progress"]:
             print(f'Snapshot status: {self.snap.id} "{self.snap.title}" - {self.snap.status}')
             self.snap = self.get_snapshot(self.snap.id)
-            time.sleep(10)
+            time.sleep(sleep_cycle_seconds)
         assert self.snap.status == 'completed', f'Snapshot status is "{self.snap.status}"'
         print(f'Snapshot status: {self.snap.id} "{self.snap.title}" - {self.snap.status}')
 
