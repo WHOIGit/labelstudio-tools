@@ -1,4 +1,5 @@
 import json
+import os
 import os.path
 from copy import deepcopy
 from typing import Union, Literal
@@ -33,10 +34,26 @@ class LabelStudioPlus:
         self.cached_task_by_pk = None
 
     @classmethod
-    def from_config(cls, config:Union[str,dict]):
+    def from_config(cls, config:Union[str,dict], use_dotenv_secrets=True):
         if isinstance(config, str):
             with open(config, 'r') as f:
                 config = json.load(f)
+
+        # to allow secrets in config files that will get pulled in from a .env file
+        if use_dotenv_secrets:
+            from dotenv import load_dotenv
+            load_dotenv()
+            def env_var_substitution(value):
+                if isinstance(value, str) and value.startswith('$'):
+                    env_var_name = value[1:]
+                    return os.getenv(env_var_name, value)
+                elif isinstance(value, dict):
+                    return {k: env_var_substitution(v) for k, v in value.items()}
+                elif isinstance(value, list):
+                    return [env_var_substitution(item) for item in value]
+                return value
+            config = env_var_substitution(config)
+
         return cls(**config)
 
 
