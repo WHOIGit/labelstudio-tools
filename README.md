@@ -46,6 +46,8 @@ ls = LabelStudioPlus.from_config('path/to/config.json')
 # fetch all tasks from the project
 tasks = ls.get_tasks(limit_fields_to=["id", "data"])
 ```
+With regards to secrets, another valid format is `"token": "$LSTOKEN"`, where `LSTOKEN` is defined in a .env file. This works for other values in the config json file as well.  
+
 
 ## Features
 
