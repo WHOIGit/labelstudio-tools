@@ -9,8 +9,8 @@ from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.types import Export
 
 
-from core import LabelStudioPlus
-from utils import read_token, attr_list_decorator
+from .core import LabelStudioPlus
+from .utils import read_token, attr_list_decorator
 
 
 class SnapshotManager:

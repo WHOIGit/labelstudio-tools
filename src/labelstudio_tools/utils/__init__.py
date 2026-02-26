@@ -3,6 +3,7 @@ from .utils import (
     attr_list_decorator,
     estimate_chunks,
     json_size_mb,
+    chunk_my_dict,
     )
 from .task_filtering import (
     simple_task_filter_builder,
