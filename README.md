@@ -137,7 +137,7 @@ data = snapman.download_snap()
 snapman.cleanup_snapshot()
 ```
 
-###️ Label Cache Management
+### Label Cache Management
 
 Cached Labels is an experimental Labelstudio feature that creates datafields from annotations or predictions. It's the only way to filter on annotations at time of writing. If an annotation/prediction is ever updated, label-caching will have to be re-run for the changes to be reflected in that data field. The following functions automates the requests for creating Cached Labels across multiple labels. If there are many tasks, requests can time out. The functions below can automatically chunk tasks using views to avoid timeouts. 
 
