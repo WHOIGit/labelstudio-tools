@@ -10,8 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-  { name = "Sidney Batchelder",
-    email = "sbatchelder@whoi.edu" },
+  { name = "Sidney Batchelder", email = "sbatchelder@whoi.edu" },
 ]
 
 dependencies = [
