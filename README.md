@@ -14,7 +14,7 @@ It is designed for power users managing large Label Studio projects programmatic
 
 ## Installation
 ```python
-pip install git+https://github.com/your-org/labelstudio-tools.git
+pip install git+https://github.com/WHOIGit/labelstudio-tools.git
 ```
 ## Quick Start
 ```python
