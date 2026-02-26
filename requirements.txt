@@ -3,3 +3,4 @@ requests
 tqdm
 boto3
 botocore
+python-dotenv
