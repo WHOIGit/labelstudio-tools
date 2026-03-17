@@ -388,7 +388,7 @@ class LabelStudioPlus:
 
         return ls_id, task_exists, task_created
 
-    def create_tasks(self, tasks: list[dict], pk_datafields: Union[str, tuple[str]], dry_run=False):
+    def create_tasks(self, tasks: list[dict], pk_datafields: Union[str, tuple[str]], dry_run=False, force_recache=True, max_mb=100):
         assert pk_datafields
         tasks = self.tasks_by_pk(tasks, pk_datafields)
         new_tasks = {}
@@ -396,9 +396,9 @@ class LabelStudioPlus:
         import_tasks_responses = []
 
         # Skip Exists
-        print('Caching tasks')
-        self.cache_tasks()
-        for key, task in tqdm(tasks.items(), desc='Skipping extant tasks'):
+        if force_recache:
+            self.cache_tasks()
+        for key, task in tasks.items():
             cached_task = self.task_exists(task, pk_datafields)
             if cached_task:
                 report[key] = dict(task_id=cached_task['id'], task_exists=True, task_created=False, task=task)
@@ -406,42 +406,37 @@ class LabelStudioPlus:
                 report[key] = dict(task_id=None, task_exists=False, task_created=True, task=task)
                 new_tasks[key] = task
 
-        if not dry_run:
-            chunk_size, chunk_count = estimate_chunks(new_tasks.values(), MAX_MB=200)  # 200MB limit per connection
-            chunked_new_tasks = chunk_my_dict(new_tasks, chunk_size)
+        n_existing = len(tasks) - len(new_tasks)
+        pbar = tqdm(total=len(tasks), initial=n_existing, desc='uploading tasks', unit='task')
 
-            if chunk_count>1:
-                chunked_new_tasks = tqdm(chunked_new_tasks,
-                    desc=f'Uploading New Tasks in chunks of {chunk_size} tasks',
-                    total=len(new_tasks), unit='task', unit_scale=True)
-            else:
-                print('Uploading New Tasks...')
+        if not dry_run and new_tasks:
+            chunk_size, chunk_count = estimate_chunks(new_tasks.values(), MAX_MB=max_mb)
+            chunked_new_tasks = chunk_my_dict(new_tasks, chunk_size)
 
             for chunk in chunked_new_tasks:
                 key0 = list(chunk.keys())[0]
                 # print('tasks[key0].keys():',chunk[key0].keys())
                 # print("task[key0]['data'].keys()", chunk[key0]['data'].keys())
                 # print("tasks[key0]['predictions'][0].keys():", chunk[key0]['predictions'][0].keys())
+
                 import_tasks_response = self.client.projects.import_tasks(
                     id=self.project.id,
                     request=list(chunk.values()),
                     return_task_ids=True,
                 )
                 import_tasks_responses.append(import_tasks_response)
-                #print(import_tasks_response)
+
 
                 upload_ids = import_tasks_response.task_ids
                 for upload_id, newtask_key in zip(upload_ids, chunk.keys()):
                     report[newtask_key]['task_id'] = upload_id
 
-                try:
-                    chunked_new_tasks.update(len(chunk))
-                except AttributeError:
-                    pass
+                pbar.update(len(chunk))
         else:
-            print('Uploading New Tasks... (wink wink)')
             for k, v in report.items():
                 v['task_created'] = False
+
+        pbar.close()
 
         return report, import_tasks_responses
 
