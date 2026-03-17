@@ -10,6 +10,7 @@ from .task_filtering import (
     parse_task_filter,
     )
 from .s3_tools import (
+    s3_read_config,
     s3_url_to_bucket_and_key,
     s3_client_and_bucket,
     s3_list_objects,
