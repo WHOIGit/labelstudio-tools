@@ -1,8 +1,38 @@
 import json
 import os
+import re
 from functools import wraps
 from itertools import islice
 import math
+
+
+def env_var_substitution(obj, use_dotenv=True):
+    """Recursively substitute $VAR_NAME tokens in strings from environment variables.
+
+    If use_dotenv is True, loads .env file first via python-dotenv.
+    Raises KeyError if a referenced env variable is not set.
+    """
+    if use_dotenv:
+        from dotenv import load_dotenv
+        load_dotenv()
+
+    def _substitute(value):
+        if isinstance(value, dict):
+            return {k: _substitute(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_substitute(v) for v in value]
+        if isinstance(value, str):
+            for match in re.findall(r'\$[A-Z_][A-Z0-9_]*', value):
+                var = match[1:]  # strip leading $
+                env_val = os.getenv(var)
+                if env_val is None:
+                    raise KeyError(
+                        f"Config references ${var} but it is not set in the environment"
+                    )
+                value = value.replace(match, env_val)
+        return value
+
+    return _substitute(obj)
 
 def read_token(token_path):
     if os.path.isfile(token_path):

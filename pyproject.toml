@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "labelstudio-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "Advanced Labelstudio API toolkit"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -33,7 +33,7 @@ Homepage = "https://github.com/WHOIGit/labelstudio-tools"
 Issues = "https://github.com/WHOIGit/labelstudio-tools/issues"
 
 [project.optional-dependencies]
-#dev = ["pytest", "ruff"]
+dev = ["pytest"]
 
 
 # If using src layout:

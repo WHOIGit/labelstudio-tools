@@ -14,11 +14,62 @@ from label_studio_sdk.types import View
 from label_studio_sdk.data_manager import Filters, Column, Type, Operator
 
 from .utils import read_token, parse_task_filter, attr_list_decorator, \
-    s3_client_and_bucket, s3_object_exists, s3_url_to_bucket_and_key, estimate_chunks
+    s3_client_and_bucket, s3_object_exists, s3_url_to_bucket_and_key, estimate_chunks, \
+    env_var_substitution
 from .utils import chunk_my_dict
 
 
-class LabelStudioPlus:
+class _TaskCache:
+    """Internal cache for task lookups by primary key fields."""
+
+    def __init__(self):
+        self.tasks = None
+        self.tasks_timestamp = None
+        self.by_pk = None
+        self.pk_fields = None
+
+    @property
+    def is_loaded(self) -> bool:
+        return self.tasks is not None
+
+    def clear(self):
+        self.tasks = None
+        self.tasks_timestamp = None
+        self.by_pk = None
+        self.pk_fields = None
+
+    def load(self, tasks: list):
+        self.tasks = tasks
+        self.tasks_timestamp = dt.datetime.now()
+        self.by_pk = None  # invalidate pk index
+
+    def build_pk_index(self, pk_fields, normalize_key_fn, task_datafields_key_fn):
+        """Build the by_pk dict. Raises on duplicates."""
+        datafields_to_task = {}
+        duplicates = {}
+        for task in self.tasks:
+            key = normalize_key_fn(task_datafields_key_fn(task, pk_fields))
+            if key in datafields_to_task:
+                if key in duplicates:
+                    datafields_to_task[key].append(task)
+                    duplicates[key] += 1
+                else:
+                    datafields_to_task[key] = [datafields_to_task[key], task]
+                    duplicates[key] = 1
+            else:
+                datafields_to_task[key] = task
+        if duplicates:
+            raise ValueError(f'Cache has duplicates: {[datafields_to_task[key] for key in duplicates]}')
+        self.by_pk = datafields_to_task
+        self.pk_fields = pk_fields
+
+    def lookup(self, key: str):
+        if self.by_pk is None:
+            return None
+        return self.by_pk.get(key)
+
+
+class TaskManager:
     def __init__(self, host:str, token:str, project:Union[int,str],
                  pk:Union[str,tuple[str]]=None, s3_config:Union[dict,str]=None):
         self.host = host
@@ -29,9 +80,7 @@ class LabelStudioPlus:
 
         self.s3, self.s3_bucket = self.get_s3client(s3_config) if s3_config else (None, None)
 
-        self.cached_tasks = None
-        self.cached_tasks_timestamp = None
-        self.cached_task_by_pk = None
+        self._cache = _TaskCache()
 
     @classmethod
     def from_config(cls, config:Union[str,dict], use_dotenv_secrets=True):
@@ -39,20 +88,8 @@ class LabelStudioPlus:
             with open(config, 'r') as f:
                 config = json.load(f)
 
-        # to allow secrets in config files that will get pulled in from a .env file
         if use_dotenv_secrets:
-            from dotenv import load_dotenv
-            load_dotenv()
-            def env_var_substitution(value):
-                if isinstance(value, str) and value.startswith('$'):
-                    env_var_name = value[1:]
-                    return os.getenv(env_var_name, value)
-                elif isinstance(value, dict):
-                    return {k: env_var_substitution(v) for k, v in value.items()}
-                elif isinstance(value, list):
-                    return [env_var_substitution(item) for item in value]
-                return value
-            config = env_var_substitution(config)
+            config = env_var_substitution(config, use_dotenv=True)
 
         return cls(**config)
 
@@ -61,6 +98,30 @@ class LabelStudioPlus:
     def headers(self):
         return { 'Content-Type': 'application/json',
                  'Authorization': f'Token {self.token}' }
+
+    # Backward-compat cache properties
+    @property
+    def cached_tasks(self):
+        return self._cache.tasks
+
+    @cached_tasks.setter
+    def cached_tasks(self, value):
+        if value is None:
+            self._cache.tasks = None
+        else:
+            self._cache.load(value)
+
+    @property
+    def cached_tasks_timestamp(self):
+        return self._cache.tasks_timestamp
+
+    @cached_tasks_timestamp.setter
+    def cached_tasks_timestamp(self, value):
+        self._cache.tasks_timestamp = value
+
+    @property
+    def cached_task_by_pk(self):
+        return self._cache.by_pk
 
     # PROJECTS #
 
@@ -81,11 +142,8 @@ class LabelStudioPlus:
                 return matches[0]
             elif len(matches) == 0:
                 raise ValueError(f"No project found with name containing '{project}'")
-            elif len(matches) > 1:
-                raise ValueError(f"Multiple projects found with name containing '{project}': {{p.id:p.title for p in matches}}")
-            return matches[0]
-        # elif isinstance(project, Project):
-        #     return project
+            else:
+                raise ValueError(f"Multiple projects found with name containing '{project}': {({p.id:p.title for p in matches})}")
         elif project is None:
             return None
         else:
@@ -157,9 +215,8 @@ class LabelStudioPlus:
                 return matches[0]
             elif len(matches) == 0:
                 raise ValueError(f"No view found with name containing '{view}'")
-            elif len(matches) > 1:
-                raise ValueError(f"Multiple views found with name containing '{view}': {{v.id:v.data['title'] for v in matches}}")
-            return matches[0]
+            else:
+                raise ValueError(f"Multiple views found with name containing '{view}': {({v.id:v.data['title'] for v in matches})}")
         elif isinstance(view, View):
             return view
         elif view is None:
@@ -282,29 +339,47 @@ class LabelStudioPlus:
         presigned_tasks = {t['id']: t['data'] for t in presigned_tasks}
         for task in tasks:
             presigned_data = presigned_tasks[task['id']]
-            presigned_data = {k: v for k, v in presigned_data.items() if v.startswith('s3://')}
+            presigned_data = {k: v for k, v in presigned_data.items()
+                             if isinstance(v, str) and v.startswith('s3://')}
             task['data_presigned'] = presigned_data
 
+    # TASK CACHING & PRIMARY KEY #
+
+    @staticmethod
+    def _normalize_pk_key(key) -> str:
+        """Deterministic key normalization for cache lookups."""
+        if isinstance(key, tuple):
+            return "|".join(str(k) for k in key)
+        return str(key)
+
+    def _normalize_pk_fields(self, data_fields):
+        """Normalize data_fields to a consistent tuple form."""
+        if isinstance(data_fields, str):
+            return (data_fields,)
+        if isinstance(data_fields, tuple):
+            return data_fields
+        if isinstance(data_fields, list):
+            return tuple(data_fields)
+        return data_fields
+
     def cache_tasks(self, fields=('id', 'data')):
-        self.cached_tasks = self.get_tasks(limit_fields_to=fields)
-        self.cached_tasks_timestamp = dt.datetime.now()
+        self._cache.load(self.get_tasks(limit_fields_to=fields))
 
     def task_datafields_key(self, task, data_fields: Union[str,tuple[str]] = None):
         if data_fields is None:
             assert self.task_pk_datafields
             data_fields = self.task_pk_datafields
-        if 'data' in task:# and 'id' in task:
-            if isinstance(data_fields,str):
+        if 'data' in task:
+            if isinstance(data_fields, str):
                 key = task['data'][data_fields]
             else:
                 key = tuple([task['data'][field] for field in data_fields])
         else:
-            if isinstance(data_fields,str):
+            if isinstance(data_fields, str):
                 key = task[data_fields]
             else:
                 key = tuple([task[field] for field in data_fields])
-        key = str(key).replace("'","")
-        return key
+        return self._normalize_pk_key(key)
 
     def tasks_by_pk(self, tasks, data_fields: Union[str, tuple[str]] = None):
         tasks_dict = {}
@@ -317,40 +392,29 @@ class LabelStudioPlus:
         return tasks_dict
 
     def cache_task_by_pk(self, data_fields: Union[str, tuple[str]]=None):
-
-        if not self.cached_tasks:
+        if not self._cache.is_loaded:
             self.cache_tasks()
 
-        datafields_to_task = {}
-        duplicates = {}
-        for task in self.cached_tasks:
-            key = self.task_datafields_key(task, data_fields)
-            if key in datafields_to_task:
-                if key in duplicates:
-                    datafields_to_task[key].append(task)
-                    duplicates[key] += 1
-                else:
-                    datafields_to_task[key] = [datafields_to_task[key], task]
-                    duplicates[key] = 1
-            else:
-                datafields_to_task[key] = task
-        if duplicates:
-            raise ValueError(f'Cache has duplicates: {[datafields_to_task[key] for key in duplicates]}')
-        if data_fields: self.task_pk_datafields = data_fields
-        self.cached_task_by_pk = datafields_to_task  # tasks_by_pk(self.cached_tasks(), data_fields)
+        data_fields = data_fields or self.task_pk_datafields
+        self._cache.build_pk_index(data_fields, self._normalize_pk_key, self.task_datafields_key)
+        if data_fields:
+            self.task_pk_datafields = data_fields
 
     def task_exists(self, task_data, data_fields: Union[str, tuple[str]], use_cache=True) -> Union[dict,None]:
-        if isinstance(data_fields, str):
-            data_fields = (data_fields,)
+        data_fields_norm = self._normalize_pk_fields(data_fields)
         matchme = self.task_datafields_key(task_data, data_fields)
 
         if use_cache:
-            if data_fields != self.task_pk_datafields:
+            cached_pk_fields = self._normalize_pk_fields(self.task_pk_datafields) if self.task_pk_datafields else None
+            if data_fields_norm != cached_pk_fields or self._cache.by_pk is None:
                 self.cache_task_by_pk(data_fields)
-            if matchme in self.cached_task_by_pk:
-                return self.cached_task_by_pk[matchme]
+            result = self._cache.lookup(matchme)
+            if result is not None:
+                return result
 
         else:
+            if isinstance(data_fields, str):
+                data_fields = (data_fields,)
             filter_items = []
             for field in data_fields:
                 item = dict(filter=f"filter:tasks:data.{field}",
@@ -379,7 +443,6 @@ class LabelStudioPlus:
             return ls_id, task_exists, task_created
 
         if not dry_run:
-            # todo fix: this sometimes errors out with httpx.RemoteProtocolError: Server disconnected without sending a response.
             new_task = self.client.tasks.create(project=self.project.id, data=task)
             ls_id = new_task.id
         else:
@@ -425,7 +488,6 @@ class LabelStudioPlus:
                     return_task_ids=True,
                 )
                 import_tasks_responses.append(import_tasks_response)
-
 
                 upload_ids = import_tasks_response.task_ids
                 for upload_id, newtask_key in zip(upload_ids, chunk.keys()):
@@ -491,6 +553,59 @@ class LabelStudioPlus:
             print(f"Failed to retrieve data: {response.status_code} {response.json()}")
 
         return response.json()
+
+
+    # DUPLICATE TASKS #
+
+    def find_duplicate_tasks(self, data_fields: Union[str, tuple[str]] = None,
+                             use_cache: bool = True) -> dict[str, list[dict]]:
+        """Find tasks with duplicate primary key values.
+        Returns {key: [task1, task2, ...]} for all keys with >1 task.
+        """
+        data_fields = data_fields or self.task_pk_datafields
+        assert data_fields, "data_fields or task_pk_datafields must be set"
+
+        if use_cache:
+            if not self._cache.is_loaded:
+                self.cache_tasks()
+            tasks = self._cache.tasks
+        else:
+            tasks = self.get_tasks(limit_fields_to=['id', 'data'])
+
+        groups = {}
+        for task in tasks:
+            key = self.task_datafields_key(task, data_fields)
+            groups.setdefault(key, []).append(task)
+
+        return {k: v for k, v in groups.items() if len(v) > 1}
+
+    def remove_duplicate_tasks(self, data_fields: Union[str, tuple[str]] = None,
+                               keep: Literal['first', 'last', 'most_annotations'] = 'first',
+                               dry_run: bool = True) -> dict:
+        """Find and optionally remove duplicate tasks.
+        keep: which duplicate to keep ('first', 'last', or 'most_annotations').
+        Returns report of what was/would be deleted.
+        """
+        duplicates = self.find_duplicate_tasks(data_fields, use_cache=not dry_run)
+        report = {}
+        for key, tasks in duplicates.items():
+            if keep == 'first':
+                keeper, to_delete = tasks[0], tasks[1:]
+            elif keep == 'last':
+                keeper, to_delete = tasks[-1], tasks[:-1]
+            elif keep == 'most_annotations':
+                tasks_sorted = sorted(tasks, key=lambda t: len(t.get('annotations', [])), reverse=True)
+                keeper, to_delete = tasks_sorted[0], tasks_sorted[1:]
+            else:
+                raise ValueError(f"Invalid keep strategy: {keep}")
+
+            report[key] = {'keep': keeper['id'], 'delete': [t['id'] for t in to_delete]}
+
+            if not dry_run:
+                for task in to_delete:
+                    self.client.tasks.delete(id=task['id'])
+
+        return report
 
 
     # CACHE LABELS #
@@ -665,12 +780,3 @@ class LabelStudioPlus:
         if bucket is None:
             bucket = self.s3_bucket.name
         return f's3://{bucket}/{s3key}'
-
-
-    # TODO project duplication, w/ w/o annotations, w/ w/o tasks
-    # TODO create project
-    # Todo add model from config-file
-    # todo add cloud import from config-file
-    # Todo testing
-    # todo pip installable
-

@@ -9,7 +9,7 @@ from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.types import Export
 
 
-from .core import LabelStudioPlus
+from .taskman import TaskManager
 from .utils import read_token, attr_list_decorator
 
 
@@ -22,7 +22,7 @@ class SnapshotManager:
         self.filterview = None
         self.snap = self.get_snapshot(snapshot)
 
-    get_project = LabelStudioPlus.get_project
+    get_project = TaskManager.get_project
 
 
     @attr_list_decorator

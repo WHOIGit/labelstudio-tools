@@ -4,6 +4,7 @@ from .utils import (
     estimate_chunks,
     json_size_mb,
     chunk_my_dict,
+    env_var_substitution,
     )
 from .task_filtering import (
     simple_task_filter_builder,
