@@ -196,7 +196,11 @@ class TaskManager:
 
         response = requests.get(url, params=params, headers=self.headers)
         if response.status_code != 200:
-            raise ValueError(f"Status Code {response.status_code}: {response.json()['detail']}")
+            try:
+                detail = response.json().get('detail', response.text)
+            except Exception:
+                detail = response.text or '(empty response)'
+            raise ValueError(f"Status Code {response.status_code}: {detail}")
         data = response.json()['columns']
         data = [item for item in data if 'parent' in item and item['parent'] == 'data']
         return data
