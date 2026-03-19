@@ -84,12 +84,18 @@ class TaskManager:
 
     @classmethod
     def from_config(cls, config:Union[str,dict], use_dotenv_secrets=True):
+        config_dir = None
         if isinstance(config, str):
+            config_dir = os.path.dirname(os.path.abspath(config))
             with open(config, 'r') as f:
                 config = json.load(f)
 
         if use_dotenv_secrets:
             config = env_var_substitution(config, use_dotenv=True)
+
+        # Resolve relative s3_config path against config file location
+        if config_dir and isinstance(config.get('s3_config'), str) and not os.path.isabs(config['s3_config']):
+            config['s3_config'] = os.path.join(config_dir, config['s3_config'])
 
         return cls(**config)
 
