@@ -8,7 +8,6 @@ import datetime as dt
 import requests
 import botocore
 from tqdm import tqdm
-from urllib.parse import urljoin
 from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.types import View
 from label_studio_sdk.data_manager import Filters, Column, Type, Operator
@@ -72,7 +71,7 @@ class _TaskCache:
 class TaskManager:
     def __init__(self, host:str, token:str, project:Union[int,str],
                  pk:Union[str,tuple[str]]=None, s3_config:Union[dict,str]=None):
-        self.host = host
+        self.host = host.rstrip('/')
         self.token = read_token(token)
         self.client:LabelStudio = LabelStudio(base_url=self.host, api_key=self.token)
         self.project = self.get_project(project)
@@ -160,7 +159,7 @@ class TaskManager:
 
     def project_counts(self):
         url = '/api/projects/counts'
-        url = urljoin(self.host, url)
+        url = self.host + url
 
         params = dict(ids=self.project.id)
         response = requests.get(url, params=params, headers=self.headers)
@@ -190,7 +189,7 @@ class TaskManager:
     def data_fields(self):
         #https://ichthyolith.whoi.edu/api/dm/columns?project=6
         url = '/api/dm/columns'
-        url = urljoin(self.host, url)
+        url = self.host + url
 
         params = {'project': self.project.id}
 
@@ -250,7 +249,7 @@ class TaskManager:
                   resolve_uri: bool = False, add_data_presigned=None,
                   page: int = None, page_size: int = 10_000):
         url = '/api/tasks'
-        url = urljoin(self.host, url)
+        url = self.host + url
 
         payload = dict(project=self.project.id)
 
@@ -514,7 +513,7 @@ class TaskManager:
 
     def update_task(self, task, patch_data=None):
         url = '/api/tasks/{id}'
-        url = urljoin(self.host, url)
+        url = self.host + url
         url = url.format(id=task['id'])
 
         if patch_data:
@@ -535,7 +534,7 @@ class TaskManager:
 
     def add_annotation(self, task_id: int, annotation):
         url = '/api/tasks/{id}/annotations'
-        url = urljoin(self.host, url)
+        url = self.host + url
         url = url.format(id=task_id)
         payload = annotation
 
@@ -549,7 +548,7 @@ class TaskManager:
 
     def add_prediction(self, task_id: int, prediction: dict):
         url = '/api/predictions'
-        url = urljoin(self.host, url)
+        url = self.host + url
 
         payload = dict(
             task=task_id,
@@ -628,7 +627,7 @@ class TaskManager:
                           exclude_ids: list[int] = None,
                           view: Union[int, str, View] = None, ):
         url = '/api/dm/actions'
-        url = urljoin(self.host, url)
+        url = self.host + url
         params = dict(id='cache_labels', project=self.project.id)
         payload = dict(
             project=self.project.id,
