@@ -30,8 +30,10 @@ class ProjectManager:
 
     @property
     def headers(self) -> dict:
+        is_legacy_token = len(self.token) <= 40
+        auth_type = 'Token' if is_legacy_token else 'Bearer'
         return {'Content-Type': 'application/json',
-                'Authorization': f'Token {self.token}'}
+                'Authorization': f'{auth_type} {self.token}'}
 
     # --- Project CRUD ---
 
@@ -91,37 +93,61 @@ class ProjectManager:
                 return os.path.join(config_dir, path)
             return path
 
-        # Create project
+        # Create project (idempotent: skip if title already exists)
         proj_cfg = config['project']
-        label_config_file = None
-        if 'label_config' in proj_cfg:
-            label_config_file = _resolve_path(proj_cfg['label_config'])
-        project = self.create_project(
-            title=proj_cfg['title'],
-            label_config_file=label_config_file,
-            description=proj_cfg.get('description'),
-        )
+        title = proj_cfg['title']
+        existing_projects = self.list_projects()
+        project = next((p for p in existing_projects if p.title == title), None)
+        if project is not None:
+            print(f"Project '{title}' already exists (id={project.id}), skipping creation.")
+        else:
+            label_config_file = None
+            if 'label_config' in proj_cfg:
+                label_config_file = _resolve_path(proj_cfg['label_config'])
+            project = self.create_project(
+                title=title,
+                label_config_file=label_config_file,
+                description=proj_cfg.get('description'),
+            )
+            print(f"Created project '{title}' (id={project.id}).")
 
-        # Add storage
+        # Add storage (idempotent: skip if storage title already exists on this project)
         if 'storage' in config:
             storage_cfg = config['storage']
             if storage_cfg.get('type') == 's3':
                 s3_config_file = _resolve_path(storage_cfg['config_file'])
-                self.add_s3_storage_from_config(
-                    project_id=project.id,
-                    config=s3_config_file,
-                )
+                s3_config = s3_read_config(s3_config_file)
+                # Merge any extra keys from storage section into s3 config (overrides file values)
+                skip_keys = {'type', 'config_file'}
+                for k, v in storage_cfg.items():
+                    if k not in skip_keys:
+                        s3_config[k] = v
+                storage_title = s3_config.get('title', s3_config.get('bucket', 's3'))
+                existing_storages = self.list_import_storages(project.id)
+                existing_storage = next((s for s in existing_storages if s.title == storage_title), None)
+                if existing_storage is not None:
+                    print(f"Storage '{storage_title}' already exists on project '{title}', skipping.")
+                else:
+                    self.add_s3_storage_from_config(project_id=project.id, config=s3_config)
+                    print(f"Added S3 storage '{storage_title}' to project '{title}'.")
 
-        # Add ML backend
+        # Add ML backend (idempotent: skip if backend with same title already exists)
         if 'ml_backend' in config:
             ml_cfg = config['ml_backend']
             if ml_cfg.get('url'):
-                self.add_ml_backend(
-                    project_id=project.id,
-                    url=ml_cfg['url'],
-                    title=ml_cfg.get('title'),
-                    is_interactive=ml_cfg.get('is_interactive', False),
-                )
+                ml_title = ml_cfg.get('title', ml_cfg['url'])
+                existing_backends = self.client.ml.list(project_id=project.id)
+                existing_backend = next((b for b in existing_backends if b.title == ml_title), None)
+                if existing_backend is not None:
+                    print(f"ML backend '{ml_title}' already exists on project '{title}', skipping.")
+                else:
+                    self.add_ml_backend(
+                        project_id=project.id,
+                        url=ml_cfg['url'],
+                        title=ml_title,
+                        is_interactive=ml_cfg.get('is_interactive', False),
+                    )
+                    print(f"Added ML backend '{ml_title}' to project '{title}'.")
 
         return project
 
@@ -140,25 +166,6 @@ class ProjectManager:
 
     # --- S3 Storage ---
 
-    def add_s3_import_storage(self, project_id: int, bucket: str, prefix: str = None,
-                              aws_access_key_id: str = None, aws_secret_access_key: str = None,
-                              s3_endpoint: str = None, presign: bool = True, presign_ttl: int = 1,
-                              regex_filter: str = None, use_blob_urls: bool = True,
-                              recursive_scan: bool = True):
-        return self.client.import_storage.s3.create(
-            project=project_id,
-            bucket=bucket,
-            prefix=prefix,
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-            s3_endpoint=s3_endpoint,
-            presign=presign,
-            presign_ttl=presign_ttl,
-            regex_filter=regex_filter,
-            use_blob_urls=use_blob_urls,
-            recursive_scan=recursive_scan,
-        )
-
     def add_s3_export_storage(self, project_id: int, bucket: str, prefix: str = None, **s3_kwargs):
         ...
 
@@ -169,20 +176,12 @@ class ProjectManager:
         return self.client.import_storage.s3.list(project=project_id)
 
     def add_s3_storage_from_config(self, project_id: int, config: Union[str, dict]):
-        config = s3_read_config(config)
-        params = {
-            'project_id': project_id,
-            'bucket': config['bucket'],
-        }
-        if 'prefix' in config:
-            params['prefix'] = config['prefix']
+        config = s3_read_config(config).copy()
+        config['project_id'] = project_id
+        config.pop('config')  # used by botocore
         if 'endpoint_url' in config:
-            params['s3_endpoint'] = config['endpoint_url']
-        if 'aws_access_key_id' in config:
-            params['aws_access_key_id'] = config['aws_access_key_id']
-        if 'aws_secret_access_key' in config:
-            params['aws_secret_access_key'] = config['aws_secret_access_key']
-        return self.add_s3_import_storage(**params)
+            config['s3endpoint'] = config.pop('endpoint_url')
+        return self.client.import_storage.s3.create(**config)
 
     # --- ML Backend ---
 
