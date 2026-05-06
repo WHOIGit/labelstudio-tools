@@ -1,0 +1,33 @@
+# development
+.claude/
+__pycache__
+.venv/
+venv/
+venv_sam2/
+.pytest_cache
+*.egg-info/
+
+# IDE
+.zed/
+.idea/
+pyrightconfig.json
+
+# imagery
+*.tif
+*.tiff
+*.jpg
+*.png
+
+# model
+*.pt
+*.cache
+runs/
+annotations/
+
+
+# misc
+*.txt
+*.pickle
+*.json
+*.csv
+scratch.py
