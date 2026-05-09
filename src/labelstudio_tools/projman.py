@@ -1,13 +1,12 @@
-import copy
 import json
 import os
-import warnings
 from typing import Union
 
 import requests
 from urllib.parse import urljoin
 from label_studio_sdk.client import LabelStudio
 
+from .config import load_config
 from .utils import read_token, attr_list_decorator, s3_read_config
 
 
@@ -38,19 +37,8 @@ class ProjectManager:
         isn't already present inline. ML-backend auth (`user`/`pass`) is
         always optional.
         """
-        config_path = config if isinstance(config, str) else None
-        config = _load_json(config)
-        config = _merge_auth(config, config_path, auth_config)
-        # Only token is required to instantiate; storage/ml validation is
-        # deferred to plan/apply so a manager can be built without storages.
-        if not config.get('token'):
-            err = config.get('__auth_file_error__')
-            msg = (f"No `token` found inline or via auth file for host "
-                   f"{config.get('host')!r}")
-            if err is not None:
-                raise FileNotFoundError(f"{err}. {msg}")
-            raise ValueError(msg)
-        return cls(host=config['host'], token=config['token'])
+        merged = load_config(config, auth_config)
+        return cls(host=merged['host'], token=merged['token'])
 
     @property
     def headers(self) -> dict:
@@ -113,14 +101,10 @@ class ProjectManager:
         exist (cannot list children of a non-existent project) — those items
         will appear as 'create' on the actual run after the project exists.
         """
-        config_path = config if isinstance(config, str) else None
-        if base_dir is None and config_path is not None:
-            cfg_dir = os.path.dirname(os.path.abspath(config_path))
+        if base_dir is None and isinstance(config, str):
+            cfg_dir = os.path.dirname(os.path.abspath(config))
             base_dir = os.path.dirname(cfg_dir)
-        config = _load_json(config)
-        config = _merge_auth(config, config_path, auth_config)
-        _check_required_auth(config)
-        config.pop('__auth_file_error__', None)
+        config = load_config(config, auth_config)
 
         plan = []
 
@@ -585,208 +569,3 @@ _SAMPLING_MAP = {
     'uniform': 'Uniform sampling',
     'uncertainty': 'Uncertainty sampling',
 }
-
-
-def _load_json(path_or_dict: Union[str, dict]) -> dict:
-    if isinstance(path_or_dict, dict):
-        return path_or_dict
-    with open(path_or_dict) as f:
-        return json.load(f)
-
-
-def _resolve_auth_path(auth_path: str, config_path: str = None) -> str:
-    """Resolve a relative auth-file path against the config file's dir, then cwd.
-
-    Absolute paths are used as-is. Returns the absolute path; raises FileNotFoundError
-    if no candidate exists. Emits a warning when falling back to cwd.
-    """
-    if os.path.isabs(auth_path):
-        if not os.path.isfile(auth_path):
-            raise FileNotFoundError(f"auth file not found: {auth_path}")
-        return auth_path
-
-    cwd_candidate = os.path.abspath(auth_path)
-    if config_path:
-        config_dir = os.path.dirname(os.path.abspath(config_path))
-        config_candidate = os.path.join(config_dir, auth_path)
-        if os.path.isfile(config_candidate):
-            return config_candidate
-        if os.path.isfile(cwd_candidate):
-            warnings.warn(
-                f"auth file {auth_path!r} not found relative to config dir "
-                f"({config_dir!r}); using cwd: {cwd_candidate!r}",
-                RuntimeWarning, stacklevel=2)
-            return cwd_candidate
-        raise FileNotFoundError(
-            f"auth file {auth_path!r} not found relative to config dir "
-            f"({config_dir!r}) or cwd ({os.getcwd()!r})")
-    if not os.path.isfile(cwd_candidate):
-        raise FileNotFoundError(
-            f"auth file {auth_path!r} not found in cwd ({os.getcwd()!r})")
-    return cwd_candidate
-
-
-def _merge_auth(config: dict, config_path: str = None,
-                auth_override: Union[str, dict] = None) -> dict:
-    """Merge auth values into `config`, returning a new dict.
-
-    Resolution order (each layer can override the previous):
-      1. Auth file referenced by `config['auth']` — base layer.
-      2. Inline values in `config` — override file values; a UserWarning is
-         emitted whenever an inline value differs from the file value.
-      3. `auth_override` parameter (path or dict) — overrides everything,
-         silently.
-
-    Auth-file load failure is deferred: if the file doesn't exist, the load
-    error is captured and only re-raised by `_check_required_auth` when an
-    inline value still isn't supplying what we need. ML-backend auth values
-    (`user`, `pass`) are always optional.
-    """
-    # Layer 1: auth file (referenced by `config['auth']`)
-    auth_file_data = None
-    auth_file_error = None
-    if config.get('auth'):
-        try:
-            resolved = _resolve_auth_path(config['auth'], config_path)
-            with open(resolved) as f:
-                auth_file_data = json.load(f)
-        except FileNotFoundError as e:
-            auth_file_error = e
-
-    # Layer 3: function param (loaded eagerly, errors not deferred)
-    override_data = None
-    if auth_override is not None:
-        if isinstance(auth_override, dict):
-            override_data = auth_override
-        else:
-            with open(auth_override) as f:
-                override_data = json.load(f)
-
-    merged = copy.deepcopy(config)
-    merged.pop('auth', None)  # consumed; not part of plan/apply
-
-    # Apply layer 1 underneath the inline values: only fill missing keys, but
-    # warn when an inline value differs from a file value (= layer 2 overrides
-    # layer 1).
-    if auth_file_data is not None:
-        _apply_auth_layer(merged, auth_file_data,
-                          mode='fill_missing', warn_on_collision=True)
-    # Apply layer 3 on top: silently overrides anything below.
-    if override_data is not None:
-        _apply_auth_layer(merged, override_data,
-                          mode='override', warn_on_collision=False)
-
-    # Stash for the caller's validation step. Removed before plan/apply use it.
-    merged['__auth_file_error__'] = auth_file_error
-    return merged
-
-
-def _check_required_auth(merged: dict) -> None:
-    """Raise if required auth values are missing. ML-backend auth is exempt.
-
-    Required:
-      - `token` (any project that talks to LS at all).
-      - `aws_access_key_id` + `aws_secret_access_key` per storage entry.
-
-    If a referenced auth file failed to load and a required value is missing,
-    raise FileNotFoundError with that context. Otherwise raise ValueError.
-    """
-    auth_file_error = merged.get('__auth_file_error__')
-    missing = []
-    if not merged.get('token'):
-        missing.append(f"labelstudio token (host={merged.get('host')!r})")
-    for sc in merged.get('storage', []):
-        sid = (f"storage bucket={sc.get('bucket')!r} "
-               f"endpoint_url={sc.get('endpoint_url')!r}")
-        if not sc.get('aws_access_key_id'):
-            missing.append(f"{sid}: aws_access_key_id")
-        if not sc.get('aws_secret_access_key'):
-            missing.append(f"{sid}: aws_secret_access_key")
-    if not missing:
-        return
-    msg = "Missing required auth values: " + "; ".join(missing)
-    if auth_file_error is not None:
-        raise FileNotFoundError(f"{auth_file_error}. {msg}")
-    raise ValueError(msg)
-
-
-def _apply_auth_layer(merged: dict, auth_data: dict,
-                      mode: str, warn_on_collision: bool) -> None:
-    """Apply a single auth layer onto `merged` (mutates in place).
-
-    mode='fill_missing': source values fill only where target is missing the key.
-    mode='override': source overrides target keys.
-    warn_on_collision: emit a UserWarning when target has a different value
-        than source for the same key.
-    """
-    # LS host/token
-    host = merged.get('host')
-    if host is not None:
-        match = _find_one(auth_data.get('labelstudio', []),
-                          lambda e: e.get('host') == host,
-                          name=f"labelstudio host={host!r}")
-        if match is not None:
-            _apply_layer_dict(merged, match, skip=('host',),
-                              mode=mode, warn_on_collision=warn_on_collision,
-                              context=f"labelstudio[{host!r}]")
-
-    # Storages
-    for storage_cfg in merged.get('storage', []):
-        bucket = storage_cfg.get('bucket')
-        endpoint_url = storage_cfg.get('endpoint_url')
-        match = _find_one(
-            auth_data.get('s3', []),
-            lambda e: e.get('bucket') == bucket and e.get('endpoint_url') == endpoint_url,
-            name=f"s3 bucket={bucket!r} endpoint_url={endpoint_url!r}")
-        if match is not None:
-            _apply_layer_dict(storage_cfg, match, skip=('bucket', 'endpoint_url'),
-                              mode=mode, warn_on_collision=warn_on_collision,
-                              context=f"storage[{bucket!r}@{endpoint_url!r}]")
-
-    # ML backend
-    ml_cfg = merged.get('ml_backend')
-    if ml_cfg:
-        name = ml_cfg.get('name')
-        backend_url = ml_cfg.get('backend_url')
-        match = None
-        if name is not None:
-            match = _find_one(auth_data.get('ml_backend', []),
-                              lambda e: e.get('name') == name,
-                              name=f"ml_backend name={name!r}")
-        if match is None and backend_url is not None:
-            match = _find_one(
-                auth_data.get('ml_backend', []),
-                lambda e: e.get('backend_url') == backend_url,
-                name=f"ml_backend backend_url={backend_url!r}")
-        if match is not None:
-            _apply_layer_dict(ml_cfg, match, skip=('name', 'backend_url'),
-                              mode=mode, warn_on_collision=warn_on_collision,
-                              context=f"ml_backend[{name or backend_url!r}]")
-
-
-def _apply_layer_dict(target: dict, source: dict, skip=(),
-                      mode: str = 'fill_missing',
-                      warn_on_collision: bool = True,
-                      context: str = "") -> None:
-    skip = set(skip)
-    for k, v in source.items():
-        if k in skip:
-            continue
-        if k in target:
-            if target[k] != v:
-                if warn_on_collision:
-                    warnings.warn(
-                        f"{context}: inline {k!r} overrides auth-file value "
-                        f"({target[k]!r} vs {v!r})",
-                        UserWarning, stacklevel=4)
-                if mode == 'override':
-                    target[k] = v
-        else:
-            target[k] = v
-
-
-def _find_one(entries, pred, name: str = ""):
-    matches = [e for e in entries if pred(e)]
-    if len(matches) > 1:
-        raise ValueError(f"Multiple auth entries match {name}")
-    return matches[0] if matches else None

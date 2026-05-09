@@ -12,10 +12,24 @@ from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.types import View
 from label_studio_sdk.data_manager import Filters, Column, Type, Operator
 
+from .config import load_config, tool_section, find_storage, storage_to_s3_config, project_ref
 from .utils import read_token, parse_task_filter, attr_list_decorator, \
-    s3_client_and_bucket, s3_object_exists, s3_url_to_bucket_and_key, estimate_chunks, \
-    env_var_substitution
+    s3_client_and_bucket, s3_object_exists, s3_url_to_bucket_and_key, estimate_chunks
 from .utils import chunk_my_dict
+
+
+def _make_cache(spec):
+    """Construct a task cache from a config spec.
+
+    Currently only "RAM" (in-memory) is implemented. Anything else is a stub
+    so that file/folder-based caching can be added later without changing the
+    config schema or call sites.
+    """
+    if spec is None or (isinstance(spec, str) and spec.upper() == "RAM"):
+        return _TaskCache()
+    raise NotImplementedError(
+        f"non-RAM cache spec not yet supported: {spec!r}. "
+        f"Only 'RAM' (in-memory) is currently implemented.")
 
 
 class _TaskCache:
@@ -70,7 +84,8 @@ class _TaskCache:
 
 class TaskManager:
     def __init__(self, host:str, token:str, project:Union[int,str],
-                 pk:Union[str,tuple[str]]=None, s3_config:Union[dict,str]=None):
+                 pk:Union[str,tuple[str]]=None, s3_config:Union[dict,str]=None,
+                 cache:Union[str,os.PathLike]="RAM"):
         self.host = host.rstrip('/')
         self.token = read_token(token)
         self.client:LabelStudio = LabelStudio(base_url=self.host, api_key=self.token)
@@ -79,24 +94,43 @@ class TaskManager:
 
         self.s3, self.s3_bucket = self.get_s3client(s3_config) if s3_config else (None, None)
 
-        self._cache = _TaskCache()
+        self._cache = _make_cache(cache)
 
     @classmethod
-    def from_config(cls, config:Union[str,dict], use_dotenv_secrets=True):
-        config_dir = None
-        if isinstance(config, str):
-            config_dir = os.path.dirname(os.path.abspath(config))
-            with open(config, 'r') as f:
-                config = json.load(f)
+    def from_config(cls, config: Union[str, dict],
+                    auth_config: Union[str, dict] = None):
+        """Build a TaskManager from a project config (with optional auth file).
 
-        if use_dotenv_secrets:
-            config = env_var_substitution(config, use_dotenv=True)
+        Reads tool-specific settings from the flat `labelstudio-tools` section:
+          - `pk`            primary-key field(s) for task lookups
+          - `cache`         "RAM" (default) — file/folder caching is stubbed
+          - `storage_title` (optional) selects a storage entry when there are >1
 
-        # Resolve relative s3_config path against config file location
-        if config_dir and isinstance(config.get('s3_config'), str) and not os.path.isabs(config['s3_config']):
-            config['s3_config'] = os.path.join(config_dir, config['s3_config'])
+        Everything else is shared with ProjectManager.from_config; see
+        `labelstudio_tools.config.load_config` for auth resolution.
+        """
+        merged = load_config(config, auth_config)
+        tools = tool_section(merged)
+        project = project_ref(merged)
+        if project is None:
+            raise ValueError("config must specify `project` (title) or `project_id`")
 
-        return cls(**config)
+        s3_config = None
+        storages = merged.get('storage', [])
+        if storages:
+            if 'storage_title' in tools:
+                entry = find_storage(merged, title=tools['storage_title'])
+            elif len(storages) == 1:
+                entry = storages[0]
+            else:
+                raise ValueError(
+                    "Multiple storages in config; set "
+                    "`labelstudio-tools.storage_title` to disambiguate")
+            s3_config = storage_to_s3_config(entry)
+
+        return cls(host=merged['host'], token=merged['token'],
+                   project=project, pk=tools.get('pk'),
+                   s3_config=s3_config, cache=tools.get('cache', 'RAM'))
 
 
     @property
