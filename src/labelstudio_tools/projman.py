@@ -217,13 +217,26 @@ class ProjectManager:
                 continue
             if kind == 'project':
                 if action == 'create':
-                    project_obj = self.client.projects.create(**item['fields'])
+                    sdk_f = {k: v for k, v in item['fields'].items()
+                             if k not in _UNTYPED_PROJECT_FIELDS}
+                    raw_f = {k: v for k, v in item['fields'].items()
+                             if k in _UNTYPED_PROJECT_FIELDS}
+                    project_obj = self.client.projects.create(**sdk_f)
                     proj_id = project_obj.id
+                    if raw_f:
+                        self._raw_patch_project(proj_id, raw_f)
                     print(f"  -> created project '{project_obj.title}' (id={project_obj.id})")
                 else:  # update
                     proj_id = item['id']
                     fields = {k: new for k, (_, new) in item['changes'].items()}
-                    self.client.projects.update(id=proj_id, **fields)
+                    sdk_f = {k: v for k, v in fields.items()
+                             if k not in _UNTYPED_PROJECT_FIELDS}
+                    raw_f = {k: v for k, v in fields.items()
+                             if k in _UNTYPED_PROJECT_FIELDS}
+                    if sdk_f:
+                        self.client.projects.update(id=proj_id, **sdk_f)
+                    if raw_f:
+                        self._raw_patch_project(proj_id, raw_f)
                     print(f"  -> updated project (id={proj_id}): {sorted(fields)}")
             elif kind == 'storage':
                 if action == 'create':
@@ -285,6 +298,10 @@ class ProjectManager:
             kwargs['show_collab_predictions'] = bool(prelabeling['enable'])
         if 'model_name' in prelabeling:
             kwargs['model_version'] = prelabeling['model_name']
+        ml = project_config.get('ml_backend', {})
+        if 'start_training_on_annotation_update' in ml:
+            kwargs['start_training_on_annotation_update'] = bool(
+                ml['start_training_on_annotation_update'])
         return kwargs
 
     def _storage_kwargs(self, storage_cfg: dict) -> dict:
@@ -314,6 +331,11 @@ class ProjectManager:
             # 'tasks' = JSON task files; 'blobs' = treat each file as a media blob
             kwargs['use_blob_urls'] = (storage_cfg['import_method'] == 'blobs')
         return kwargs
+
+    def _raw_patch_project(self, project_id: int, fields: dict) -> None:
+        url = urljoin(self.host, f'/api/projects/{project_id}/')
+        resp = requests.patch(url, headers=self.headers, json=fields)
+        resp.raise_for_status()
 
     def _ml_kwargs(self, ml_cfg: dict) -> dict:
         """Translate a (already auth-merged) ml_backend entry → ml.create/update kwargs."""
@@ -486,6 +508,11 @@ class ProjectManager:
             self.client.projects.import_tasks(id=new_project.id, request=tasks)
 
         return new_project
+
+
+# Project fields the SDK's projects.create/update don't expose as named params.
+# These are sent via raw PATCH /api/projects/{id}/.
+_UNTYPED_PROJECT_FIELDS = frozenset({'start_training_on_annotation_update'})
 
 
 # --- Split-config helpers ---
