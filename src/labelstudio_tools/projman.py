@@ -142,13 +142,18 @@ class ProjectManager:
             proj_id = existing_proj.id
 
         # --- Storages ---
-        existing_storages = self.list_import_storages(proj_id) if proj_id else []
+        existing_pools = {
+            'import': self.client.import_storage.s3.list(project=proj_id) if proj_id else [],
+            'export': self.client.export_storage.s3.list(project=proj_id) if proj_id else [],
+        }
         for storage_cfg in config.get('storage', []):
+            direction = _storage_direction(storage_cfg)
             desired = self._storage_kwargs(storage_cfg)
             s_title = desired['title']
-            existing = next((s for s in existing_storages if s.title == s_title), None)
+            existing = next((s for s in existing_pools[direction] if s.title == s_title), None)
             if existing is None:
-                plan.append({'kind': 'storage', 'title': s_title, 'action': 'create',
+                plan.append({'kind': 'storage', 'direction': direction,
+                             'title': s_title, 'action': 'create',
                              'id': None, 'changes': None, 'fields': desired})
             else:
                 diff = _diff_kwargs(
@@ -156,7 +161,8 @@ class ProjectManager:
                     # Secrets are write-only; LS does not return them.
                     ignore=('aws_access_key_id', 'aws_secret_access_key'),
                 )
-                plan.append({'kind': 'storage', 'title': s_title,
+                plan.append({'kind': 'storage', 'direction': direction,
+                             'title': s_title,
                              'action': 'update' if diff else 'noop',
                              'id': existing.id,
                              'changes': diff or None, 'fields': None})
@@ -239,13 +245,17 @@ class ProjectManager:
                         self._raw_patch_project(proj_id, raw_f)
                     print(f"  -> updated project (id={proj_id}): {sorted(fields)}")
             elif kind == 'storage':
+                direction = item['direction']
+                client = (self.client.import_storage.s3 if direction == 'import'
+                          else self.client.export_storage.s3)
                 if action == 'create':
-                    self.client.import_storage.s3.create(project=proj_id, **item['fields'])
-                    print(f"  -> created storage '{item['title']}'")
+                    client.create(project=proj_id, **item['fields'])
+                    print(f"  -> created {direction}-storage '{item['title']}'")
                 else:
                     fields = {k: new for k, (_, new) in item['changes'].items()}
-                    self.client.import_storage.s3.update(id=item['id'], **fields)
-                    print(f"  -> updated storage '{item['title']}' (id={item['id']}): {sorted(fields)}")
+                    client.update(id=item['id'], **fields)
+                    print(f"  -> updated {direction}-storage '{item['title']}' "
+                          f"(id={item['id']}): {sorted(fields)}")
             elif kind == 'ml_backend':
                 if action == 'create':
                     self.client.ml.create(project=proj_id, **item['fields'])
@@ -306,6 +316,10 @@ class ProjectManager:
 
     def _storage_kwargs(self, storage_cfg: dict) -> dict:
         """Translate a (already auth-merged) storage entry → s3.create/update kwargs."""
+        stype = storage_cfg.get('type', 's3')
+        if stype != 's3':
+            raise NotImplementedError(
+                f"storage type {stype!r} not supported; only 's3' is implemented")
         bucket = storage_cfg.get('bucket')
         endpoint_url = storage_cfg.get('endpoint_url')
         kwargs = {
@@ -570,10 +584,14 @@ def print_config_plan(plan: list) -> None:
     print("Plan:")
     for item in plan:
         kind = item['kind']
+        if kind == 'storage':
+            label = f"storage:{item['direction']}"
+        else:
+            label = kind
         title = item['title']
         action = item['action']
         ident = f" id={item['id']}" if item.get('id') is not None else ""
-        print(f"  [{kind:<10}] '{title}'{ident}: {action.upper()}")
+        print(f"  [{label:<14}] '{title}'{ident}: {action.upper()}")
         if action == 'create' and item.get('fields'):
             for k in sorted(item['fields']):
                 v = item['fields'][k]
@@ -596,3 +614,24 @@ _SAMPLING_MAP = {
     'uniform': 'Uniform sampling',
     'uncertainty': 'Uncertainty sampling',
 }
+
+# Storage `mode` field aliases. LS calls inbound storage either "import" or
+# "source" depending on context; outbound is "export" or "target".
+_STORAGE_DIRECTION = {
+    'import': 'import', 'source': 'import',
+    'export': 'export', 'target': 'export',
+}
+
+
+def _storage_direction(cfg: dict) -> str:
+    mode = cfg.get('mode')
+    if mode is None:
+        raise ValueError(
+            f"storage entry {cfg.get('title')!r} missing 'mode' "
+            f"(one of: {sorted(_STORAGE_DIRECTION)})")
+    direction = _STORAGE_DIRECTION.get(mode)
+    if direction is None:
+        raise ValueError(
+            f"storage entry {cfg.get('title')!r}: invalid mode {mode!r} "
+            f"(one of: {sorted(_STORAGE_DIRECTION)})")
+    return direction

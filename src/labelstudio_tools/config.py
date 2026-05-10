@@ -18,7 +18,7 @@ from typing import Union
 # (array of tables); we normalize both to a list.
 _PROJECT_LIST_FIELDS = ('storage',)
 # Auth-file keys that semantically hold a list of entries.
-_AUTH_LIST_FIELDS = ('labelstudio', 's3', 'ml_backend')
+_AUTH_LIST_FIELDS = ('labelstudio', 'storage', 'ml_backend')
 
 
 def load_config(config: Union[str, dict],
@@ -234,16 +234,23 @@ def _apply_auth_layer(merged: dict, auth_data: dict,
                               context=f"labelstudio[{host!r}]")
 
     for storage_cfg in merged.get('storage', []):
+        # Auth file uses a unified `[[storage]]` list; entries are matched on
+        # (type, bucket, endpoint_url). Default type is 's3' on both sides.
+        storage_type = storage_cfg.get('type', 's3')
         bucket = storage_cfg.get('bucket')
         endpoint_url = storage_cfg.get('endpoint_url')
         match = _find_one(
-            auth_data.get('s3', []),
-            lambda e: e.get('bucket') == bucket and e.get('endpoint_url') == endpoint_url,
-            name=f"s3 bucket={bucket!r} endpoint_url={endpoint_url!r}")
+            auth_data.get('storage', []),
+            lambda e: (e.get('type', 's3') == storage_type
+                       and e.get('bucket') == bucket
+                       and e.get('endpoint_url') == endpoint_url),
+            name=f"storage type={storage_type!r} bucket={bucket!r} "
+                 f"endpoint_url={endpoint_url!r}")
         if match is not None:
-            _apply_layer_dict(storage_cfg, match, skip=('bucket', 'endpoint_url'),
+            _apply_layer_dict(storage_cfg, match,
+                              skip=('type', 'bucket', 'endpoint_url'),
                               mode=mode, warn_on_collision=warn_on_collision,
-                              context=f"storage[{bucket!r}@{endpoint_url!r}]")
+                              context=f"storage[{storage_type}:{bucket!r}@{endpoint_url!r}]")
 
     ml_cfg = merged.get('ml_backend')
     if ml_cfg:
