@@ -19,6 +19,7 @@ dependencies = [
     "tqdm",
     "boto3",
     "python-dotenv",
+    "tomli_w",
 ]
 
 keywords = ["labelstudio"]

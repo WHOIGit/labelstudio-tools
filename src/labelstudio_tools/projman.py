@@ -292,13 +292,13 @@ class ProjectManager:
             kwargs['expert_instruction'] = annot['instructions']
         if 'show_before_labeling' in annot:
             kwargs['show_instruction'] = bool(annot['show_before_labeling'])
-        prelabeling = annot.get('prelabeling', {})
-        if 'enable' in prelabeling:
-            kwargs['evaluate_predictions_automatically'] = bool(prelabeling['enable'])
-            kwargs['show_collab_predictions'] = bool(prelabeling['enable'])
-        if 'model_name' in prelabeling:
-            kwargs['model_version'] = prelabeling['model_name']
         ml = project_config.get('ml_backend', {})
+        if 'annotation_prelabeling' in ml:
+            enable = bool(ml['annotation_prelabeling'])
+            kwargs['evaluate_predictions_automatically'] = enable
+            kwargs['show_collab_predictions'] = enable
+            if enable and ml.get('name'):
+                kwargs['model_version'] = ml['name']
         if 'start_training_on_annotation_update' in ml:
             kwargs['start_training_on_annotation_update'] = bool(
                 ml['start_training_on_annotation_update'])

@@ -3,12 +3,22 @@
 All `from_config` entry points (ProjectManager, TaskManager, ...) route through
 `load_config` so that auth resolution, path resolution, validation, and tool
 namespacing live in one place.
+
+Config files are TOML.
 """
 import copy
-import json
 import os
+import tomllib
 import warnings
 from typing import Union
+
+
+# Project-config keys that semantically hold a list of entries. TOML lets
+# users write a single entry as `[storage]` (table) instead of `[[storage]]`
+# (array of tables); we normalize both to a list.
+_PROJECT_LIST_FIELDS = ('storage',)
+# Auth-file keys that semantically hold a list of entries.
+_AUTH_LIST_FIELDS = ('labelstudio', 's3', 'ml_backend')
 
 
 def load_config(config: Union[str, dict],
@@ -31,7 +41,8 @@ def load_config(config: Union[str, dict],
     ValueError.
     """
     config_path = config if isinstance(config, str) else None
-    config = _load_json(config)
+    config = _load_config(config)
+    _normalize_list_fields(config, _PROJECT_LIST_FIELDS)
     config = _merge_auth(config, config_path, auth_config)
     _check_required_auth(config)
     config.pop('__auth_file_error__', None)
@@ -93,11 +104,29 @@ def storage_to_s3_config(storage: dict) -> dict:
 
 # --- internal: file/auth loading -------------------------------------------
 
-def _load_json(path_or_dict: Union[str, dict]) -> dict:
+def _load_config(path_or_dict: Union[str, dict]) -> dict:
+    """Load a TOML config file, or pass through a dict."""
     if isinstance(path_or_dict, dict):
         return path_or_dict
-    with open(path_or_dict) as f:
-        return json.load(f)
+    ext = os.path.splitext(path_or_dict)[1].lower()
+    if ext != '.toml':
+        raise ValueError(
+            f"Unsupported config file extension {ext!r}; expected .toml "
+            f"(path: {path_or_dict!r})")
+    with open(path_or_dict, 'rb') as f:
+        return tomllib.load(f)
+
+
+def _normalize_list_fields(d: dict, fields) -> None:
+    """If a known list-field is a single dict, wrap it as a one-element list.
+
+    Lets TOML configs use either `[storage]` (single table) or `[[storage]]`
+    (array of tables) interchangeably.
+    """
+    for k in fields:
+        v = d.get(k)
+        if isinstance(v, dict):
+            d[k] = [v]
 
 
 def _resolve_auth_path(auth_path: str, config_path: str = None) -> str:
@@ -146,18 +175,15 @@ def _merge_auth(config: dict, config_path: str = None,
     if config.get('auth'):
         try:
             resolved = _resolve_auth_path(config['auth'], config_path)
-            with open(resolved) as f:
-                auth_file_data = json.load(f)
+            auth_file_data = _load_config(resolved)
+            _normalize_list_fields(auth_file_data, _AUTH_LIST_FIELDS)
         except FileNotFoundError as e:
             auth_file_error = e
 
     override_data = None
     if auth_override is not None:
-        if isinstance(auth_override, dict):
-            override_data = auth_override
-        else:
-            with open(auth_override) as f:
-                override_data = json.load(f)
+        override_data = _load_config(auth_override)
+        _normalize_list_fields(override_data, _AUTH_LIST_FIELDS)
 
     merged = copy.deepcopy(config)
     merged.pop('auth', None)
