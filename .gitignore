@@ -34,3 +34,4 @@ scratch.py
 
 !ls_project_config.*.json
 !ls_auth.example.json
+configs/
