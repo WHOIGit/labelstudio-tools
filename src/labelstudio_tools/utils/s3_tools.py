@@ -38,9 +38,12 @@ def s3_read_config(config: Union[dict, str, os.PathLike]) -> dict:
 
 def s3_url_to_bucket_and_key(url:str) -> (str,str):
     # eg: # s3://ichthyolith/rois_jpg/abcxyz.jpg
-    assert url.startswith('s3://')
+    if not isinstance(url, str) or not url.startswith('s3://'):
+        raise ValueError(f"expected s3:// URL, got {url!r}")
     bucket = url.split('/')[2]  # ichthyolith
     key = url.split('/',3)[-1]  # rois_jpg/abcxyz.jpg
+    if not bucket or not key:
+        raise ValueError(f"invalid s3 URL: {url!r}")
     return bucket, key
 
 
@@ -84,10 +87,12 @@ def s3_list_objects(client_config, bucket=None, prefix=None):
 
 def s3_object_exists(client_config, key, bucket=None):
     if key.startswith('s3://'):     # s3://bucket/prefix/abcxyz.jpg
-        assert bucket is None
+        if bucket is not None:
+            raise ValueError("bucket must not be supplied when key is an s3:// URL")
         bucket, key = s3_url_to_bucket_and_key(key)
     else:
-        assert bucket is not None
+        if bucket is None:
+            raise ValueError("bucket is required when key is not an s3:// URL")
 
     if isinstance(client_config, dict):
         client, Bucket = s3_client_and_bucket(client_config, bucket)
@@ -106,4 +111,3 @@ def s3_object_exists(client_config, key, bucket=None):
         else:
             raise e
     return True
-

@@ -35,10 +35,9 @@ def env_var_substitution(obj, use_dotenv=True):
     return _substitute(obj)
 
 def read_token(token_path):
-    if os.path.isfile(token_path):
-        with open(token_path) as f:
-            return f.read().strip()
-    return token_path  # assume it's the token itself
+    from ..auth import read_token as _read_token
+
+    return _read_token(token_path)
 
 def attr_list_decorator(func):
     @wraps(func)

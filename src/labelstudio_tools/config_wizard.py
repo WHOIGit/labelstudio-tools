@@ -17,15 +17,16 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import questionary
 import requests
 import tomllib
-from PIL import ImageColor
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import FormattedText
 from tabulate import tabulate
+
+from .auth import validate_ls_token, validate_ml_backend, validate_storage
 
 
 # --- Curated colors (hex + display name) ----------------------------------
@@ -216,47 +217,6 @@ def describe(state: State, key: str) -> None:
         questionary.print(f"  → {DESCRIPTIONS[key]}", style="italic fg:#888888")
 
 
-# --- Validators ------------------------------------------------------------
-
-def validate_ls_token(host: str, token: str, timeout: int = 10) -> tuple[bool, str]:
-    auth_type = "Token" if len(token) <= 40 else "Bearer"
-    try:
-        r = requests.get(urljoin(host, "/api/version"),
-                         headers={"Authorization": f"{auth_type} {token}"},
-                         timeout=timeout, allow_redirects=True)
-        return r.status_code == 200, f"HTTP {r.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-
-def validate_storage(s: dict) -> tuple[bool, str]:
-    if not s.get("aws_access_key_id") or not s.get("aws_secret_access_key"):
-        return False, "credentials not available (deferred)"
-    try:
-        import boto3
-        client = boto3.client(
-            "s3",
-            endpoint_url=s.get("endpoint_url"),
-            aws_access_key_id=s["aws_access_key_id"],
-            aws_secret_access_key=s["aws_secret_access_key"],
-        )
-        client.head_bucket(Bucket=s["bucket"])
-        return True, "head_bucket OK"
-    except Exception as e:
-        return False, str(e).splitlines()[0]
-
-
-def validate_ml_backend(url: str, user: Optional[str] = None,
-                        password: Optional[str] = None,
-                        timeout: int = 10) -> tuple[bool, str]:
-    auth = (user, password) if user else None
-    try:
-        r = requests.get(url, auth=auth, timeout=timeout, allow_redirects=True)
-        return r.status_code == 200, f"HTTP {r.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-
 # --- Color helpers ---------------------------------------------------------
 
 _HEX6 = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -271,9 +231,12 @@ def parse_color(s: str) -> tuple[str, Optional[str]]:
     if _HEX3.match(s):
         return "#" + "".join(c * 2 for c in s[1:]).upper(), None
     name = s.lower().replace(" ", "")
-    if name in ImageColor.colormap:
-        rgb = ImageColor.getrgb(name)
-        return "#{:02X}{:02X}{:02X}".format(*rgb), s.lower()
+    try:
+        import webcolors
+
+        return webcolors.name_to_hex(name).upper(), s.lower()
+    except Exception:
+        pass
     raise ValueError(f"not a hex (#RRGGBB) or recognized CSS color name: {s!r}")
 
 

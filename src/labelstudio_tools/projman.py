@@ -7,7 +7,8 @@ from urllib.parse import urljoin
 from label_studio_sdk.client import LabelStudio
 
 from .config import load_config
-from .utils import read_token, attr_list_decorator, s3_read_config
+from .auth import json_headers
+from .utils import attr_list_decorator, s3_read_config
 
 
 class ProjectManager:
@@ -15,7 +16,7 @@ class ProjectManager:
 
     def __init__(self, host: str, token: str):
         self.host = host
-        self.token = read_token(token)
+        self.token = token
         self.client = LabelStudio(base_url=self.host, api_key=self.token)
 
     @classmethod
@@ -42,10 +43,7 @@ class ProjectManager:
 
     @property
     def headers(self) -> dict:
-        is_legacy_token = len(self.token) <= 40
-        auth_type = 'Token' if is_legacy_token else 'Bearer'
-        return {'Content-Type': 'application/json',
-                'Authorization': f'{auth_type} {self.token}'}
+        return json_headers(self.token)
 
     # --- Project CRUD ---
 
@@ -595,18 +593,27 @@ def print_config_plan(plan: list) -> None:
         if action == 'create' and item.get('fields'):
             for k in sorted(item['fields']):
                 v = item['fields'][k]
-                print(f"      + {k} = {_short_repr(v)}")
+                print(f"      + {k} = {_short_repr(v, k)}")
         elif action == 'update' and item.get('changes'):
             for k in sorted(item['changes']):
                 cur, new = item['changes'][k]
-                print(f"      ~ {k}: {_short_repr(cur)} -> {_short_repr(new)}")
+                print(f"      ~ {k}: {_short_repr(cur, k)} -> {_short_repr(new, k)}")
 
 
-def _short_repr(v, maxlen=80):
+def _short_repr(v, key: str = None, maxlen=80):
+    if key and _is_secret_key(key):
+        return "'***REDACTED***'"
     s = repr(v)
     if len(s) > maxlen:
         s = s[:maxlen - 3] + '...'
     return s
+
+
+def _is_secret_key(key: str) -> bool:
+    lowered = key.lower()
+    secret_parts = ('token', 'secret', 'password', 'pass', 'access_key',
+                    'session')
+    return any(part in lowered for part in secret_parts)
 
 
 _SAMPLING_MAP = {

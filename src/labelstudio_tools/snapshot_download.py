@@ -9,18 +9,27 @@ from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.types import Export
 
 
+from .config import load_config, project_ref
 from .taskman import TaskManager
-from .utils import read_token, attr_list_decorator
+from .utils import attr_list_decorator
 
 
 class SnapshotManager:
     def __init__(self, host, token, project, snapshot=None):
         self.host = host
-        self.token = read_token(token)
+        self.token = token
         self.client = LabelStudio(base_url=self.host, api_key=self.token)
         self.project = self.get_project(project)
         self.filterview = None
         self.snap = self.get_snapshot(snapshot)
+
+    @classmethod
+    def from_config(cls, config, auth_config=None, snapshot=None):
+        merged = load_config(config, auth_config)
+        project = project_ref(merged)
+        if project is None:
+            raise ValueError("config must specify `project` (title) or `project_id`")
+        return cls(merged['host'], merged['token'], project, snapshot=snapshot)
 
     get_project = TaskManager.get_project
 
@@ -109,7 +118,8 @@ class SnapshotManager:
             print(f'Snapshot status: {self.snap.id} "{self.snap.title}" - {self.snap.status}')
             self.snap = self.get_snapshot(self.snap.id)
             time.sleep(sleep_cycle_seconds)
-        assert self.snap.status == 'completed', f'Snapshot status is "{self.snap.status}"'
+        if self.snap.status != 'completed':
+            raise ValueError(f'Snapshot status is "{self.snap.status}"')
         print(f'Snapshot status: {self.snap.id} "{self.snap.title}" - {self.snap.status}')
 
 
@@ -149,11 +159,12 @@ class SnapshotManager:
         else:
             snap = self.get_snapshot(snap)
 
+        errors = []
         try:
             self.client.projects.exports.delete(export_pk=snap.id, id=self.project.id)
             print(f"DELETED: Snapshot {snap.id} deleted successfully")
         except Exception as e:
-            print(type(e), f'Error deleting snapshot {snap.id} "{snap.title}"')
+            errors.append(f'error deleting snapshot {snap.id} "{snap.title}": {e}')
 
         if cleanup_filterview and self.filterview:
             print(self.filterview)
@@ -164,8 +175,7 @@ class SnapshotManager:
                 self.client.views.delete(view.id)
                 print(f'DELETED: View {view.id} "{view_title}" deleted successfully')
             except Exception as e:
-                print(type(e), f'View "{view_title}" failed to be removed')
-
-
-
+                errors.append(f'view "{view_title}" failed to be removed: {e}')
+        if errors:
+            raise ValueError("; ".join(errors))
 

@@ -13,7 +13,6 @@ from .cli_utils import (
     auth_sources_from_args,
     load_project_config_for_cli,
     print_table,
-    project_auth_override,
     project_manager_from_cli_config,
     resolve_config_path,
     server_version,
@@ -99,9 +98,7 @@ def run_project_update(args: argparse.Namespace) -> int:
 def _run_project_apply(args: argparse.Namespace, *, expected: str) -> int:
     config_path = resolve_config_path(args.config)
     manager = project_manager_from_cli_config(config_path)
-    auth_override = project_auth_override(config_path)
-    auth_arg = str(auth_override) if auth_override else None
-    plan = manager.plan_config(str(config_path), auth_arg)
+    plan = manager.plan_config(str(config_path))
     project_item = next((item for item in plan if item["kind"] == "project"), None)
     if project_item is None:
         raise CliError("project plan did not contain a project item")
@@ -112,8 +109,7 @@ def _run_project_apply(args: argparse.Namespace, *, expected: str) -> int:
     if expected == "update" and project_item["action"] == "create":
         merged = load_project_config_for_cli(config_path)
         raise CliError(f"project does not exist: {project_ref(merged)!r}")
-    manager.create_project_from_config(
-        str(config_path), auth_arg, dry_run=args.dry_run)
+    manager.create_project_from_config(str(config_path), dry_run=args.dry_run)
     return 0
 
 

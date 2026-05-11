@@ -10,18 +10,13 @@ import sys
 import tomllib
 from pathlib import Path
 from typing import Iterable, Optional
-from urllib.parse import urljoin
 
 import requests
 from tabulate import tabulate
 
+from .auth import auth_header, validate_ls_token, validate_ml_backend, validate_storage
 from .config import load_config
-from .config_wizard import (
-    run_auth_default_mode,
-    validate_ls_token,
-    validate_ml_backend,
-    validate_storage,
-)
+from .config_wizard import run_auth_default_mode
 from .projman import ProjectManager
 from .taskman import TaskManager
 
@@ -143,51 +138,16 @@ def normalize_auth_lists(data: dict) -> dict:
     return data
 
 
-def project_auth_override(config_path: Path) -> Optional[Path]:
-    """Return LSTOOL_CONFIG_AUTH fallback when the project has no auth/secrets."""
-    auth_env = os.environ.get("LSTOOL_CONFIG_AUTH")
-    if not auth_env:
-        return None
-    raw = read_toml(config_path)
-    if raw.get("auth"):
-        return None
-    if _has_inline_secret(raw):
-        return None
-    return resolve_existing_path(auth_env, what="auth file")
-
-
-def _has_inline_secret(raw: dict) -> bool:
-    if raw.get("token"):
-        return True
-    storages = raw.get("storage", [])
-    if isinstance(storages, dict):
-        storages = [storages]
-    for storage in storages:
-        if storage.get("aws_access_key_id") or storage.get("aws_secret_access_key"):
-            return True
-    ml = raw.get("ml_backend")
-    mls = ml if isinstance(ml, list) else ([ml] if isinstance(ml, dict) else [])
-    for entry in mls:
-        if entry.get("user") or entry.get("pass"):
-            return True
-    return False
-
-
 def load_project_config_for_cli(config_path: Path) -> dict:
-    auth_override = project_auth_override(config_path)
-    return load_config(str(config_path), str(auth_override) if auth_override else None)
+    return load_config(str(config_path))
 
 
 def project_manager_from_cli_config(config_path: Path) -> ProjectManager:
-    auth_override = project_auth_override(config_path)
-    return ProjectManager.from_config(
-        str(config_path), str(auth_override) if auth_override else None)
+    return ProjectManager.from_config(str(config_path))
 
 
 def task_manager_from_cli_config(config_path: Path) -> TaskManager:
-    auth_override = project_auth_override(config_path)
-    return TaskManager.from_config(
-        str(config_path), str(auth_override) if auth_override else None)
+    return TaskManager.from_config(str(config_path))
 
 
 def add_config_arg(parser: argparse.ArgumentParser) -> None:
@@ -412,12 +372,6 @@ def _write_or_print(text: str, outfile: Optional[Path]) -> None:
         return
     outfile.parent.mkdir(parents=True, exist_ok=True)
     outfile.write_text(text)
-
-
-def auth_header(token: str) -> dict:
-    is_legacy_token = len(token) <= 40
-    auth_type = "Token" if is_legacy_token else "Bearer"
-    return {"Authorization": f"{auth_type} {token}"}
 
 
 def auth_sources_from_args(args: argparse.Namespace, *,

@@ -43,6 +43,8 @@ def load_config(config: Union[str, dict],
     config_path = config if isinstance(config, str) else None
     config = _load_config(config)
     _normalize_list_fields(config, _PROJECT_LIST_FIELDS)
+    if auth_config is None and _should_use_env_auth(config):
+        auth_config = _env_auth_path(config_path)
     config = _merge_auth(config, config_path, auth_config)
     _check_required_auth(config)
     config.pop('__auth_file_error__', None)
@@ -99,6 +101,62 @@ def storage_to_s3_config(storage: dict) -> dict:
     for src, dst in field_map.items():
         if storage.get(src) is not None:
             out[dst] = storage[src]
+    return out
+
+
+def _should_use_env_auth(config: dict) -> bool:
+    """Whether LSTOOL_CONFIG_AUTH should fill missing project auth."""
+    if config.get('auth'):
+        return False
+    if config.get('token'):
+        return False
+    for storage in config.get('storage', []):
+        if storage.get('aws_access_key_id') or storage.get('aws_secret_access_key'):
+            return False
+    ml_cfg = config.get('ml_backend')
+    if isinstance(ml_cfg, dict) and (ml_cfg.get('user') or ml_cfg.get('pass')):
+        return False
+    return bool(os.environ.get('LSTOOL_CONFIG_AUTH'))
+
+
+def _env_auth_path(config_path: str = None) -> Union[str, None]:
+    auth_path = os.environ.get('LSTOOL_CONFIG_AUTH')
+    if not auth_path:
+        return None
+    if os.path.isabs(auth_path):
+        return auth_path
+
+    cwd_candidate = os.path.abspath(auth_path)
+    config_dir_env = os.environ.get('LSTOOL_CONFIG_DIR')
+    if config_dir_env:
+        config_dir_candidate = os.path.abspath(
+            os.path.join(config_dir_env, auth_path))
+        candidates = _dedupe_paths([config_dir_candidate, cwd_candidate])
+        existing = [p for p in candidates if os.path.isfile(p)]
+        if len(existing) == 1:
+            return existing[0]
+        if len(existing) > 1:
+            raise ValueError(
+                f"ambiguous LSTOOL_CONFIG_AUTH {auth_path!r}; exists in "
+                f"multiple locations: {existing}")
+        raise FileNotFoundError(
+            f"LSTOOL_CONFIG_AUTH {auth_path!r} not found; checked: {candidates}")
+
+    if config_path:
+        config_dir = os.path.dirname(os.path.abspath(config_path))
+        config_candidate = os.path.join(config_dir, auth_path)
+        if os.path.isfile(config_candidate):
+            return config_candidate
+    return auth_path
+
+
+def _dedupe_paths(paths) -> list:
+    out = []
+    seen = set()
+    for path in paths:
+        if path not in seen:
+            out.append(path)
+            seen.add(path)
     return out
 
 

@@ -4,7 +4,8 @@ from label_studio_sdk.data_manager import Filters, Column, Type, Operator
 
 Types = [v for k, v in vars(Type).items() if not k.startswith('_')]
 Operators = [v for k, v in vars(Operator).items() if not k.startswith('_')]
-Columns = [v for k, v in vars(Column).items() if not k.startswith('_') or k!='data']
+Columns = [v for k, v in vars(Column).items()
+           if not k.startswith('_') and k != 'data']
 
 
 def simple_task_filter_builder(field, value, operator='equal', fieldtype='String'):
@@ -26,16 +27,20 @@ def parse_task_filter(filter_obj, data_fields=None):
     else:
         task_filter = json.loads(filter_obj)
 
-    assert 'items' in task_filter
-    assert isinstance(task_filter['items'], list)
-    assert 'conjunction' in task_filter
+    if 'items' not in task_filter or not isinstance(task_filter['items'], list):
+        raise ValueError("task filter must contain an `items` list")
+    if 'conjunction' not in task_filter:
+        raise ValueError("task filter must contain `conjunction`")
     conjunction = task_filter['conjunction'].lower()
-    assert conjunction in [Filters.OR,Filters.AND]
+    if conjunction not in [Filters.OR, Filters.AND]:
+        raise ValueError(f"invalid filter conjunction: {conjunction!r}")
 
     filter_items = []
     for item in task_filter['items']:
-        assert item['type'] in Types
-        assert item['operator'] in Operators
+        if item.get('type') not in Types:
+            raise ValueError(f"invalid filter type: {item.get('type')!r}")
+        if item.get('operator') not in Operators:
+            raise ValueError(f"invalid filter operator: {item.get('operator')!r}")
 
         filter_field = item['filter']
         if filter_field.startswith('filter:'):
@@ -49,7 +54,9 @@ def parse_task_filter(filter_obj, data_fields=None):
             if data_fields:
                 # todo fails on empty project, because there are no fields
                 #print('parse_task_filter data_fields:',data_fields)
-                assert filter_field in data_fields
+                if filter_field not in data_fields:
+                    raise ValueError(
+                        f"filter data field {filter_field!r} not found in project data fields")
             filter_field = Column.data(filter_field)
         else:
             filter_field = item['filter']

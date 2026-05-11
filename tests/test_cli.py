@@ -6,7 +6,6 @@ from labelstudio_tools.cli import build_parser
 from labelstudio_tools.cli_utils import (
     CliError,
     auth_sources_from_args,
-    project_auth_override,
     resolve_existing_path,
     run_auth_test,
 )
@@ -60,28 +59,6 @@ def test_resolve_existing_path_errors_on_ambiguity(monkeypatch, tmp_path):
 
     with pytest.raises(CliError, match="ambiguous"):
         resolve_existing_path("same.toml")
-
-
-def test_project_auth_override_uses_env_only_without_inline_auth(monkeypatch, tmp_path):
-    config = tmp_path / "ls_project.toml"
-    auth = tmp_path / "ls_auth.toml"
-    config.write_text('host = "https://ls.example"\nproject = "demo"\n')
-    auth.write_text("")
-
-    monkeypatch.setenv("LSTOOL_CONFIG_AUTH", str(auth))
-
-    assert project_auth_override(config) == auth.resolve()
-
-
-def test_project_auth_override_skips_inline_token(monkeypatch, tmp_path):
-    config = tmp_path / "ls_project.toml"
-    auth = tmp_path / "ls_auth.toml"
-    config.write_text('host = "https://ls.example"\ntoken = "secret"\n')
-    auth.write_text("")
-
-    monkeypatch.setenv("LSTOOL_CONFIG_AUTH", str(auth))
-
-    assert project_auth_override(config) is None
 
 
 def test_auth_sources_from_args_uses_lstool_config(monkeypatch):

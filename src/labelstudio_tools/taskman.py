@@ -12,8 +12,9 @@ from label_studio_sdk.client import LabelStudio
 from label_studio_sdk.types import View
 from label_studio_sdk.data_manager import Filters, Column, Type, Operator
 
+from .auth import json_headers
 from .config import load_config, tool_section, find_storage, storage_to_s3_config, project_ref
-from .utils import read_token, parse_task_filter, attr_list_decorator, \
+from .utils import parse_task_filter, attr_list_decorator, \
     s3_client_and_bucket, s3_object_exists, s3_url_to_bucket_and_key, estimate_chunks
 from .utils import chunk_my_dict
 
@@ -87,7 +88,7 @@ class TaskManager:
                  pk:Union[str,tuple[str]]=None, s3_config:Union[dict,str]=None,
                  cache:Union[str,os.PathLike]="RAM"):
         self.host = host.rstrip('/')
-        self.token = read_token(token)
+        self.token = token
         self.client:LabelStudio = LabelStudio(base_url=self.host, api_key=self.token)
         self.project = self.get_project(project)
         self.task_pk_datafields = pk
@@ -135,8 +136,7 @@ class TaskManager:
 
     @property
     def headers(self):
-        return { 'Content-Type': 'application/json',
-                 'Authorization': f'Token {self.token}' }
+        return json_headers(self.token)
 
     # Backward-compat cache properties
     @property
@@ -310,10 +310,10 @@ class TaskManager:
             view = self.get_view(view)
             payload['view'] = view.id
 
+        original_filter_dict = filter_dict
         query = dict()
         if filter_dict:
-            filter_dict = self.parse_task_filter(filter_dict)
-            query['filters'] = filter_dict
+            query['filters'] = self.parse_task_filter(filter_dict)
         if ids and exclude_ids:
             raise ValueError('ids and exclude_ids are mutually exclusive arguments')
         elif ids:
@@ -350,7 +350,7 @@ class TaskManager:
             next_page = 1
             more_tasks = tasks
             total = None
-            if ids is None and exclude_ids is None and view is None and filter_dict is None:
+            if ids is None and exclude_ids is None and view is None and original_filter_dict is None:
                 # well I reckon we're trying to grab the whole project then!
                 total = self.project_counts()['task_number']
             with tqdm(initial=page_size,
@@ -365,7 +365,7 @@ class TaskManager:
                         exclude_ids=exclude_ids,
                         limit_fields_to=limit_fields_to,
                         with_annotations=with_annotations,
-                        filter_dict=filter_dict,
+                        filter_dict=original_filter_dict,
                         view=view,
                         resolve_uri=resolve_uri,
                         add_data_presigned=add_data_presigned,
@@ -410,7 +410,8 @@ class TaskManager:
 
     def task_datafields_key(self, task, data_fields: Union[str,tuple[str]] = None):
         if data_fields is None:
-            assert self.task_pk_datafields
+            if not self.task_pk_datafields:
+                raise ValueError("task primary-key data field is not configured")
             data_fields = self.task_pk_datafields
         if 'data' in task:
             if isinstance(data_fields, str):
@@ -459,10 +460,11 @@ class TaskManager:
             if isinstance(data_fields, str):
                 data_fields = (data_fields,)
             filter_items = []
+            source_data = task_data.get('data', task_data)
             for field in data_fields:
                 item = dict(filter=f"filter:tasks:data.{field}",
                             operator=Operator.EQUAL,
-                            value=task_data[field],
+                            value=source_data[field],
                             type=Type.Unknown)
                 filter_items.append(item)
             filter_dict = dict(conjunction=Filters.AND,
@@ -476,7 +478,8 @@ class TaskManager:
         return None
 
     def create_task(self, task: dict, pk_datafields: Union[str, tuple[str]], dry_run=False, use_cache=False):
-        assert pk_datafields
+        if not pk_datafields:
+            raise ValueError("pk_datafields is required")
         ls_id, task_exists, task_created = None, False, False
 
         fetched_task = self.task_exists(task, pk_datafields, use_cache=use_cache)
@@ -495,7 +498,8 @@ class TaskManager:
         return ls_id, task_exists, task_created
 
     def create_tasks(self, tasks: list[dict], pk_datafields: Union[str, tuple[str]], dry_run=False, force_recache=True, max_mb=100):
-        assert pk_datafields
+        if not pk_datafields:
+            raise ValueError("pk_datafields is required")
         tasks = self.tasks_by_pk(tasks, pk_datafields)
         new_tasks = {}
         report = {}
@@ -537,9 +541,8 @@ class TaskManager:
                     report[newtask_key]['task_id'] = upload_id
 
                 pbar.update(len(chunk))
-        else:
-            for k, v in report.items():
-                v['task_created'] = False
+        elif dry_run:
+            pbar.update(len(new_tasks))
 
         pbar.close()
 
@@ -559,9 +562,12 @@ class TaskManager:
 
         response = requests.patch(url, json=payload, headers=self.headers)
 
-        # Check if the request was successful
-        if response.status_code != 200:
-            print(f"Failed to retrieve data: {response.status_code} {response.content}")
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            raise ValueError(
+                f"Failed to update task {task['id']}: "
+                f"{response.status_code} {response.text}") from e
 
         return response.json()
 
@@ -574,9 +580,12 @@ class TaskManager:
 
         response = requests.post(url, json=payload, headers=self.headers)
 
-        # Check if the request was successful
-        if response.status_code != 201:
-            print(f"Failed to retrieve data: {response.status_code} {response.content}")
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            raise ValueError(
+                f"Failed to add annotation to task {task_id}: "
+                f"{response.status_code} {response.text}") from e
 
         return response.json()
 
@@ -591,9 +600,12 @@ class TaskManager:
 
         response = requests.post(url, json=payload, headers=self.headers)
 
-        # Check if the request was successful
-        if response.status_code != 201:
-            print(f"Failed to retrieve data: {response.status_code} {response.json()}")
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            raise ValueError(
+                f"Failed to add prediction to task {task_id}: "
+                f"{response.status_code} {response.text}") from e
 
         return response.json()
 
@@ -606,7 +618,8 @@ class TaskManager:
         Returns {key: [task1, task2, ...]} for all keys with >1 task.
         """
         data_fields = data_fields or self.task_pk_datafields
-        assert data_fields, "data_fields or task_pk_datafields must be set"
+        if not data_fields:
+            raise ValueError("data_fields or task_pk_datafields must be set")
 
         if use_cache:
             if not self._cache.is_loaded:
@@ -623,21 +636,36 @@ class TaskManager:
         return {k: v for k, v in groups.items() if len(v) > 1}
 
     def remove_duplicate_tasks(self, data_fields: Union[str, tuple[str]] = None,
-                               keep: Literal['first', 'last', 'most_annotations'] = 'first',
+                               keep: Literal['first', 'latest', 'most-annotated'] = 'first',
                                dry_run: bool = True) -> dict:
         """Find and optionally remove duplicate tasks.
-        keep: which duplicate to keep ('first', 'last', or 'most_annotations').
+        keep: which duplicate to keep ('first', 'latest', or 'most-annotated').
         Returns report of what was/would be deleted.
         """
-        duplicates = self.find_duplicate_tasks(data_fields, use_cache=not dry_run)
+        data_fields = data_fields or self.task_pk_datafields
+        if not data_fields:
+            raise ValueError("data_fields or task_pk_datafields must be set")
+        tasks = self.get_tasks(
+            limit_fields_to=['id', 'data', 'created_at', 'annotations'],
+            with_annotations=True)
+        groups = {}
+        for task in tasks:
+            key = self.task_datafields_key(task, data_fields)
+            groups.setdefault(key, []).append(task)
+        duplicates = {k: v for k, v in groups.items() if len(v) > 1}
         report = {}
         for key, tasks in duplicates.items():
             if keep == 'first':
-                keeper, to_delete = tasks[0], tasks[1:]
-            elif keep == 'last':
-                keeper, to_delete = tasks[-1], tasks[:-1]
-            elif keep == 'most_annotations':
-                tasks_sorted = sorted(tasks, key=lambda t: len(t.get('annotations', [])), reverse=True)
+                tasks_sorted = sorted(tasks, key=lambda t: t.get('created_at') or '')
+                keeper, to_delete = tasks_sorted[0], tasks_sorted[1:]
+            elif keep == 'latest':
+                tasks_sorted = sorted(tasks, key=lambda t: t.get('created_at') or '', reverse=True)
+                keeper, to_delete = tasks_sorted[0], tasks_sorted[1:]
+            elif keep == 'most-annotated':
+                tasks_sorted = sorted(
+                    tasks,
+                    key=lambda t: _finished_annotation_count(t),
+                    reverse=True)
                 keeper, to_delete = tasks_sorted[0], tasks_sorted[1:]
             else:
                 raise ValueError(f"Invalid keep strategy: {keep}")
@@ -684,9 +712,12 @@ class TaskManager:
 
         response = requests.post(url, params=params, json=payload, headers=self.headers)
 
-        # Check if the request was successful
-        if response.status_code != 200:
-            print(f"Failed to retrieve data: {response.status_code} {response.json()}")
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            raise ValueError(
+                f"Failed to update cache label {control_tag!r}: "
+                f"{response.status_code} {response.text}") from e
 
 
     def update_cachelabels(self,
@@ -707,7 +738,7 @@ class TaskManager:
                 timeout_groups = []
             else:
                 ids = [task['id'] for task in self.get_tasks(limit_fields_to=['id'])]
-                chunk_size = min(10000, len(ids)//timeout_groups)
+                chunk_size = max(1, min(10000, len(ids)//timeout_groups))
                 timeout_groups = [ids[x:x+chunk_size] for x in range(0, len(ids), chunk_size)]
 
         pbar = tqdm(control_tags)
@@ -777,7 +808,8 @@ class TaskManager:
         return s3_exists
 
     def validate_all_task_s3_objects(self, tasks=None):
-        assert self.task_pk_datafields
+        if not self.task_pk_datafields:
+            raise ValueError("task primary-key data field is not configured")
         if tasks is None and not self.cached_tasks:
             self.cache_tasks()
         if tasks is None:
@@ -797,7 +829,9 @@ class TaskManager:
         if os.path.isfile(outfile) and not clobber:
             return False
         bucket = self.s3.Bucket(bucket) if bucket else self.s3_bucket
-        os.makedirs(os.path.dirname(outfile), exist_ok=True)
+        outdir = os.path.dirname(outfile)
+        if outdir:
+            os.makedirs(outdir, exist_ok=True)
         bucket.download_file(s3key, outfile)
         return True
 
@@ -819,7 +853,16 @@ class TaskManager:
         return self.upload_s3key(filepath, s3key, bucket, clobber)
 
     def s3key_to_s3url(self, s3key:str, bucket=None):
-        assert s3key[0] != '/'
+        if s3key.startswith('/'):
+            raise ValueError("s3 key must be relative, not absolute")
         if bucket is None:
             bucket = self.s3_bucket.name
         return f's3://{bucket}/{s3key}'
+
+
+def _finished_annotation_count(task: dict) -> int:
+    return sum(
+        1
+        for annotation in task.get('annotations', []) or []
+        if not annotation.get('was_cancelled') and not annotation.get('cancelled')
+    )

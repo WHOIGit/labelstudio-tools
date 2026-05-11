@@ -1,158 +1,224 @@
 # Labelstudio Tools
-Advanced Labelstudio API toolkit
 
-`labelstudio-tools` extends the official label-studio-sdk with:
-- Idempotent bulk task actions
-- Client-side task caching
-- Snapshot (export) automation
-- Bulk downloads
-- S3 validation & transfer helpers
-- Cache-Label management
-- View & filter helpers
-
-It is designed for power users managing large Label Studio projects programmatically.
+`labelstudio-tools` is a Python 3.11+ library and CLI for working with Label
+Studio projects idempotently. It extends the official `label-studio-sdk` with
+helpers for project setup, bulk task management, snapshots, S3 references, cache
+labels, and Label Studio task/annotation payload construction.
 
 ## Installation
-```python
+
+```bash
 pip install git+https://github.com/WHOIGit/labelstudio-tools.git
 ```
-## Quick Start
-```python
-from labelstudio_tools import LabelStudioPlus
 
-ls = LabelStudioPlus(
-    host="https://your-labelstudio-instance.com",
-    token="LABELSTUDIO_API_TOKEN",
-    project="Some Project Name"  # or project_id integer
-)
+For development:
 
-# or
-
-ls = LabelStudioPlus.from_config('path/to/config.json')
-# where config.json looks like
-# {
-#   "host": "https://my-labelstudio-instance.com",
-#   "token": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-#   "project": 1,
-#   "pk": "image",
-#   "s3_config": {
-#     "bucket": "myBucket",
-#     "endpoint_url": "http://mys3.endpoint.com",
-#     "aws_access_key_id": "XXXXXXXXXXXXXXXXXXXX",
-#     "aws_secret_access_key": "xXxxXXXxxxxXxxXxxxXXxXXXXXxXXXXXxXxxXXxx"
-#   }
-# }
-
-# fetch all tasks from the project
-tasks = ls.get_tasks(limit_fields_to=["id", "data"])
+```bash
+pip install -e ".[dev]"
+lstool --help
 ```
-With regards to secrets, another valid format is `"token": "$LSTOKEN"`, where `LSTOKEN` is defined in a .env file. This works for other values in the config json file as well.  
 
+## CLI Quickstart
 
-## Features
+```bash
+lstool auth wizard --default
+lstool project wizard --default
+lstool project list
+lstool tasks view --format table
+```
 
-### Idempotent Bulk Uploads
+The CLI honors:
 
-Avoid duplicate task creation using primary-key fields.
+- `LSTOOL_CONFIG`: default project config path.
+- `LSTOOL_CONFIG_DIR`: search root for relative config/auth/filter paths.
+- `LSTOOL_CONFIG_AUTH`: fallback auth file when the project config has no
+  `auth` field and no inline secrets.
+- `LSTOOL_TABLEFMT`: table format used by table-printing commands.
+
+See `CLI.md` for the full command surface.
+
+## Library Quickstart
+
+Use `TaskManager` for task-centric workflows:
 
 ```python
-report, responses = ls.create_tasks(
-    tasks=my_tasks,
-    pk_datafields="image"
+from labelstudio_tools import TaskManager
+
+tasks = TaskManager.from_config("configs/ls_project.toml")
+
+rows = tasks.get_tasks(limit_fields_to=["id", "data"])
+report, responses = tasks.create_tasks(
+    tasks=my_task_payloads,
+    pk_datafields="image",
+    dry_run=True,
 )
 ```
-- Skips existing tasks
-- Chunked uploads (respects connection size limits)
-- Detailed report of created vs existing tasks, as well as chunk api responses
-- Optional dry-run mode
 
-
-### Client-Side Task Caching
-
-Speed up repeated lookups.
-```python
-ls.cache_tasks()
-ls.cache_task_by_pk("image")
-
-existing = ls.task_exists(task_data, data_fields="image", use_cache=True)
-```
-
-Useful for:
-- Deduplication
-- Fast existence checks
-- Large dataset management
-
-### Advanced Task Retrieval
-```python
-from labelstudio_tools.utils import simple_task_filter_builder
-my_filter = simple_task_filter_builder(field='myDatafield', value='some_value', operator='equal')
-#{"conjunction": "and",
-# "items": [{"filter": f"filter:tasks:data.myDatafield",
-#          "operator": "equal",
-#          "value": "some_value",
-#          "type": "String"}]
-# }
-tasks = ls.get_tasks(
-    with_annotations=True,
-    view="Some Specified View",
-    filter_dict=my_filter,
-)
-```
-Supports:
-- View-based filtering
-- Explicit ID selection
-- Pagination auto-handling for large requests, with progress bar
-- Resolving S3 URLs to presigned URLs
-- Optional inclusion of annotations
-
-### S3 Integration
-
-Optional S3 support for validating and transferring task data, if s3_config specified.
-Transfer functions have a `clobber` argument that will skip the actual transfer if a same-key or same-filename already exists. 
+Use `ProjectManager` for project-level resources:
 
 ```python
-ls.s3key_to_url('somewhere/something') # --> 's3://mybucket/somewhere/something'
-ls.s3key_exists('somewhere/something') # --> false
-ls.upload_s3url('path/to/local_file.ext', s3url='s3://mybucket/somewhere/something', clobber=False)
-ls.s3key_exists('somewhere/something') # --> true
-ls.download_s3url('s3://mybucket/somewhere/something', outfile='path/to/downloaded_file.ext', clobber=False)
+from labelstudio_tools import ProjectManager
+
+projects = ProjectManager.from_config("configs/ls_project.toml")
+plan = projects.plan_config("configs/ls_project.toml")
+projects.create_project_from_config("configs/ls_project.toml", dry_run=True)
 ```
 
-### Snapshot & Export Management
+Use `SnapshotManager` for export snapshots:
 
-Great for bulk-downloads of your data and annotation
-Managed via SnapshotManager.
 ```python
 from labelstudio_tools import SnapshotManager
 
-snapman = SnapshotManager(host=..., token=..., project=...)
-snapman.make_snapshot(title=..., filter_obj=...)
-
-# check or wait for snapshot to be ready
-snapman.is_snap_ready()  # --> true/false or...
-snapman.wait_for_snapshot_completion(sleep_cycle_seconds=10)
-
-# then downlaod
-data = snapman.download_snap()
-
-# and optionally cleanup if you will not be downloading again
-snapman.cleanup_snapshot()
+snapshots = SnapshotManager.from_config("configs/ls_project.toml")
+snapshots.make_snapshot()
+snapshots.wait_for_snapshot_completion()
+data = snapshots.download_snap()
 ```
 
-### Label Cache Management
+## Config Files
 
-Cached Labels is an experimental Labelstudio feature that creates datafields from annotations or predictions. It's the only way to filter on annotations at time of writing. If an annotation/prediction is ever updated, label-caching will have to be re-run for the changes to be reflected in that data field. The following functions automates the requests for creating Cached Labels across multiple labels. If there are many tasks, requests can time out. The functions below can automatically chunk tasks using views to avoid timeouts. 
+Project configs are TOML. Secrets can live inline, but the recommended pattern
+is a project config plus a sidecar auth file.
+
+```toml
+# configs/ls_project.toml
+host = "https://labelstudio.example.org"
+project = "Demo Project"
+label_config = "label_ui.xml"
+auth = "ls_auth.toml"
+
+[labelstudio-tools]
+pk = "image"
+cache = "RAM"
+
+[[storage]]
+type = "s3"
+mode = "source"
+title = "demo source"
+bucket = "my-bucket"
+endpoint_url = "https://s3.example.org"
+bucket_prefix = "tasks/"
+```
+
+```toml
+# configs/ls_auth.toml
+[[labelstudio]]
+host = "https://labelstudio.example.org"
+token = "LABEL_STUDIO_TOKEN"
+
+[[storage]]
+type = "s3"
+bucket = "my-bucket"
+endpoint_url = "https://s3.example.org"
+aws_access_key_id = "..."
+aws_secret_access_key = "..."
+```
+
+`LSTOOL_CONFIG_AUTH` is also honored by the core config loader when a project
+config does not specify `auth` and does not include inline secrets.
+
+## Idempotent Task Management
+
+`TaskManager.create_task()` and `TaskManager.create_tasks()` use primary-key
+data fields to skip tasks that already exist in Label Studio.
 
 ```python
-ls.update_cachelabels(
-    control_tags=["my_annotation_label", "another_label"],
-    with_counters=False,
-    from_predictions = False,
-    timeout_groups = 'auto'
+report, responses = tasks.create_tasks(
+    tasks=my_task_payloads,
+    pk_datafields="image",
+    force_recache=True,
 )
 ```
 
+Useful helpers include:
 
-# License
+- `cache_tasks()` and `cache_task_by_pk()` for repeated existence checks.
+- `task_exists()` for one-off idempotent checks.
+- `find_duplicate_tasks()` and `remove_duplicate_tasks()` for duplicate cleanup.
+- `update_task()`, `add_annotation()`, and `add_prediction()` for direct task
+  mutation.
+
+## Retrieval, Filters, And Views
+
+```python
+from labelstudio_tools.utils import simple_task_filter_builder
+
+task_filter = simple_task_filter_builder(
+    field="dataset",
+    value="train",
+    operator="equal",
+)
+
+subset = tasks.get_tasks(
+    with_annotations=True,
+    filter_dict=task_filter,
+    view="Review Queue",
+)
+```
+
+`TaskManager` also exposes `list_views()`, `get_view()`, `data_fields()`, and
+label-config inspection helpers such as `config_control_labels()`.
+
+## S3 Helpers
+
+When a project config includes S3 storage credentials, `TaskManager` can validate
+and transfer S3 objects referenced by task data:
+
+```python
+exists = tasks.s3url_exists("s3://my-bucket/path/image.jpg")
+tasks.download_s3url("s3://my-bucket/path/image.jpg", "downloads/image.jpg")
+tasks.upload_s3url("local/file.jpg", "s3://my-bucket/path/file.jpg")
+```
+
+Lower-level helpers are available from `labelstudio_tools.utils`.
+
+## Task Payload Helpers
+
+`taskclass.py` contains base classes and helpers for building Label Studio
+task/annotation payloads:
+
+```python
+from labelstudio_tools import BBox, ResultField, BaseRegion, BaseAnnotation, BaseTask
+```
+
+These are intended for project-specific task builders that need consistent
+Label Studio result dictionaries.
+
+## Experimental Areas
+
+The cache-label helpers wrap Label Studio's experimental cache-label action:
+
+```python
+tasks.update_cachelabels(
+    control_tags=["label"],
+    with_counters=False,
+    from_predictions=False,
+    timeout_groups="auto",
+)
+```
+
+The labeling UI builder is available as `labelstudio_tools.ui_builder` and
+requires YAML input plus an XML template.
+
+## Status
+
+Stable enough for day-to-day use:
+
+- `TaskManager.from_config()`
+- `ProjectManager.from_config()`
+- idempotent task creation
+- task retrieval/filtering
+- project config planning/application
+- S3 existence/upload/download helpers
+- snapshot export helpers
+
+Still being tightened:
+
+- cache-label creation and refresh ergonomics
+- CLI coverage for every library helper
+- file/folder-backed task caching beyond RAM
+- generated filter builders
+
+## License
 
 MIT License
