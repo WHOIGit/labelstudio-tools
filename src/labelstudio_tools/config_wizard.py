@@ -7,8 +7,11 @@ Always writes a NEW project config (warns before overwriting). For editing an
 existing config, just open the .toml file in an editor.
 """
 import argparse
+import itertools
 import re
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -312,8 +315,47 @@ def ask_text(msg: str, default: str = "", validate=None) -> str:
     return questionary.text(msg, default=default, validate=validate).unsafe_ask()
 
 
+def ask_password(msg: str, default: str = "") -> str:
+    """Masked text input. Falls back to displaying default after entry if blank."""
+    val = questionary.password(msg).unsafe_ask()
+    if val == "" and default:
+        return default
+    return val
+
+
 def ask_select(msg: str, choices: list, default=None) -> Any:
     return questionary.select(msg, choices=choices, default=default).unsafe_ask()
+
+
+class Spinner:
+    """Tiny threaded spinner: with Spinner('Validating'): ..."""
+
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def __init__(self, msg: str):
+        self.msg = msg
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        sys.stdout.write("\r" + " " * (len(self.msg) + 4) + "\r")
+        sys.stdout.flush()
+
+    def _run(self):
+        for ch in itertools.cycle(self.FRAMES):
+            if self._stop.is_set():
+                return
+            sys.stdout.write(f"\r{ch} {self.msg}")
+            sys.stdout.flush()
+            time.sleep(0.1)
 
 
 # --- Step: descriptions toggle ---------------------------------------------
@@ -374,32 +416,59 @@ def step_auth_file(state: State) -> None:
     pick = ask_select("Auth file:", choices=choices)
     if pick == DEFER:
         state.auth_mode = "defer"
-    elif pick == INLINE:
+        return
+    if pick == INLINE:
         state.auth_mode = "inline"
-    elif pick == NEW:
+        return
+    if pick == NEW:
         state.auth_mode = "new"
-        # filename prompted later, after host (so we can default to ls_auth.{subdomain}.toml)
-    else:
-        state.auth_mode = "existing"
-        state.auth_path = state.config_dir / pick
-        state.auth_data = _load_auth_file(state.auth_path)
+        default = (f"ls_auth.{host_subdomain(state.host)}.toml"
+                   if state.host else "ls_auth.toml")
+        while True:
+            v = ask_text("New auth filename:", default=default)
+            p = _resolve_outfile(v, state.config_dir)
+            if p.exists():
+                if not ask_yn(f"Overwrite existing {p}?", default=False):
+                    continue
+            state.auth_path = p
+            return
+    # existing
+    state.auth_mode = "existing"
+    state.auth_path = state.config_dir / pick
+    state.auth_data = _load_auth_file(state.auth_path)
 
 
 # --- Step: host ------------------------------------------------------------
 
+def _ping_host(host: str, timeout: int = 10) -> tuple[bool, str]:
+    try:
+        with Spinner(f"pinging {host}"):
+            r = requests.get(host, timeout=timeout, allow_redirects=True)
+        return True, f"HTTP {r.status_code}"
+    except Exception as e:
+        return False, str(e).splitlines()[0]
+
+
 def step_host(state: State) -> None:
     describe(state, "host")
-    NEW_HOST = "[New host]"
-    options = []
-    if state.auth_mode == "existing":
-        options = [e.get("host") for e in state.auth_data.get("labelstudio", []) if e.get("host")]
-    if options:
-        pick = ask_select("Host:", choices=options + [NEW_HOST])
-        if pick != NEW_HOST:
-            state.host = pick
+    host = ask_text("Host URL:", default=state.host or "https://",
+                    validate=lambda v: bool(urlparse(v).netloc) or "must be a URL")
+    while True:
+        ok, msg = _ping_host(host)
+        if ok:
+            questionary.print(f"✓ reachable ({msg})", style="fg:#00aa00")
+            state.host = host
             return
-    state.host = ask_text("Host URL:", default="https://",
-                          validate=lambda v: bool(urlparse(v).netloc) or "must be a URL")
+        questionary.print(f"✗ ping failed: {msg}", style="fg:#cc4400")
+        action = ask_select("Action:", choices=["edit", "retry", "continue (skip ping)"])
+        if action == "edit":
+            host = ask_text("Host URL:", default=host,
+                            validate=lambda v: bool(urlparse(v).netloc) or "must be a URL")
+            continue
+        if action == "retry":
+            continue  # re-ping same host
+        state.host = host
+        return
 
 
 # --- Step: token + validation ----------------------------------------------
@@ -422,7 +491,7 @@ def step_token(state: State) -> None:
     if existing:
         state.token = existing
     else:
-        token = ask_text("API token (blank → defer):", default="")
+        token = questionary.password("API token (blank → defer):").unsafe_ask()
         if not token:
             questionary.print("(blank token — proceeding with auth deferred for LS)",
                               style="italic fg:#888888")
@@ -433,7 +502,8 @@ def step_token(state: State) -> None:
         if state.auth_mode == "new":
             state.auth_data["labelstudio"].append({"host": state.host, "token": token})
     if state.token:
-        ok, msg = validate_ls_token(state.host, state.token)
+        with Spinner("validating token"):
+            ok, msg = validate_ls_token(state.host, state.token)
         state.token_works = ok
         if ok:
             questionary.print(f"✓ token works ({msg})", style="fg:#00aa00")
@@ -522,22 +592,6 @@ def step_outfile(state: State) -> None:
     else:
         v = ask_text("Output filename:", default=default)
         state.outfile = _resolve_outfile(v, state.config_dir)
-
-
-# --- Step: auth file path (when [New]) -------------------------------------
-
-def step_new_auth_filename(state: State) -> None:
-    if state.auth_mode != "new":
-        return
-    default = f"ls_auth.{host_subdomain(state.host)}.toml"
-    while True:
-        v = ask_text("New auth filename:", default=default)
-        p = _resolve_outfile(v, state.config_dir)
-        if p.exists():
-            if not ask_yn(f"Overwrite existing {p}?", default=False):
-                continue
-        state.auth_path = p
-        return
 
 
 # --- Step: label_config ----------------------------------------------------
@@ -733,7 +787,8 @@ def prompt_storage(state: State, preload: Optional[dict] = None) -> Optional[dic
                           style="italic fg:#888888")
     elif need_keys:
         ak = ask_text("aws_access_key_id:", default=s.get("aws_access_key_id", ""))
-        sk = ask_text("aws_secret_access_key:", default=s.get("aws_secret_access_key", ""))
+        sk = ask_password("aws_secret_access_key (hidden):",
+                          default=s.get("aws_secret_access_key", ""))
         if ak:
             s["aws_access_key_id"] = ak
         if sk:
@@ -752,6 +807,19 @@ def prompt_storage(state: State, preload: Optional[dict] = None) -> Optional[dic
         if s.get("bucket") else "")
     s["title"] = ask_text("title:", default=title_default)
     s["presigned_urls"] = ask_yn("presigned_urls?", default=bool(s.get("presigned_urls", True)))
+    s["presigned_urls_expiry"] = int(ask_text(
+        "presigned_urls_expiry (minutes):",
+        default=str(s.get("presigned_urls_expiry", 15)),
+        validate=lambda v: v.isdigit() or "must be a positive integer"))
+    s["import_method"] = ask_select(
+        "import_method:",
+        choices=["tasks", "blobs"],
+        default=s.get("import_method", "tasks"))
+    s["file_name_filter"] = ask_text(
+        "file_name_filter (regex; default '(?!)' = none):",
+        default=s.get("file_name_filter", "(?!)"))
+    s["scan_all_subfolders"] = ask_yn(
+        "scan_all_subfolders?", default=bool(s.get("scan_all_subfolders", True)))
     return s
 
 
@@ -801,7 +869,7 @@ def step_storage_loop(state: State) -> None:
 def _add_one_storage(state: State) -> Optional[dict]:
     """Run one storage-entry sub-flow. Returns the dict or None on cancel."""
     load = ask_yn("Load from other config / labelstudio?", default=False)
-    preload = None
+    s: Optional[dict] = None
     if load:
         opts = _dedupe_storage_options(collect_other_storages(state))
         ls_opts = _dedupe_storage_options(collect_ls_storages(state)) if state.token_works else []
@@ -814,23 +882,22 @@ def _add_one_storage(state: State) -> Optional[dict]:
             pick = ask_select("Pick a storage to preload:", choices=choices)
             if pick == CANCEL:
                 return None
-            preload = dict(all_opts[choices.index(pick)]["data"])
-            # Warn if config-source had no auth creds either inline or in selected auth.
-            from_inline_keys = bool(preload.get("aws_access_key_id"))
-            if not from_inline_keys and not _auth_has_storage_creds(state, preload):
+            s = dict(STORAGE_DEFAULTS)
+            s.update(all_opts[choices.index(pick)]["data"])
+            # Warn if no creds available (neither inline in source nor in selected auth).
+            from_inline_keys = bool(s.get("aws_access_key_id"))
+            if not from_inline_keys and not _auth_has_storage_creds(state, s):
                 questionary.print(
                     "WARNING: this storage has no credentials in the source config "
                     "or the selected auth file.", style="fg:#ff8800")
                 if not ask_yn("Continue with this selection?", default=True):
                     return None
-
-    while True:
-        if preload is None:
-            s = prompt_storage(state)
-        else:
-            s = prompt_storage(state, preload=preload)
+    if s is None:
+        s = prompt_storage(state)
         if s is None:
             return None
+
+    while True:
         _show_storage(s)
         action = ask_select(
             "Action:",
@@ -845,17 +912,18 @@ def _add_one_storage(state: State) -> Optional[dict]:
                 questionary.print("(validate not possible — auth deferred)",
                                   style="italic fg:#888888")
             else:
-                ok, msg = validate_storage(s)
+                with Spinner(f"head_bucket {s.get('bucket','?')}"):
+                    ok, msg = validate_storage(s)
                 if ok:
                     questionary.print(f"✓ {msg}", style="fg:#00aa00")
                 else:
                     questionary.print(f"✗ {msg}  (that's too bad — continue)",
                                       style="fg:#cc4400")
-            ask_yn("Continue?", default=True)
-            preload = s  # keep editable on next loop
             continue
         if action == "edit":
-            preload = s
+            s_new = prompt_storage(state, preload=s)
+            if s_new is not None:
+                s = s_new
             continue
 
 
@@ -1035,8 +1103,8 @@ def step_ml_loop(state: State) -> None:
 
 
 def _add_one_ml(state: State) -> Optional[dict]:
-    load = ask_yn("Load from other config / labelstudio?", default=False)
-    preload = None
+    load = ask_yn("Load from other config / labelstudio?", default=True)
+    m: Optional[dict] = None
     if load:
         opts = _dedupe_ml_options(collect_other_ml(state))
         ls_opts = _dedupe_ml_options(collect_ls_ml(state)) if state.token_works else []
@@ -1049,12 +1117,14 @@ def _add_one_ml(state: State) -> Optional[dict]:
             pick = ask_select("Pick an ml-backend to preload:", choices=choices)
             if pick == CANCEL:
                 return None
-            preload = dict(all_opts[choices.index(pick)]["data"])
-
-    while True:
-        m = prompt_ml_backend(state, preload=preload)
+            m = dict(ML_DEFAULTS)
+            m.update(all_opts[choices.index(pick)]["data"])
+    if m is None:
+        m = prompt_ml_backend(state)
         if m is None:
             return None
+
+    while True:
         _show_ml(m)
         action = ask_select(
             "Action:",
@@ -1069,17 +1139,18 @@ def _add_one_ml(state: State) -> Optional[dict]:
                 questionary.print("(validate not possible — auth deferred)",
                                   style="italic fg:#888888")
             else:
-                ok, msg = validate_ml_backend(m["backend_url"])
+                with Spinner(f"GET {m.get('backend_url','?')}"):
+                    ok, msg = validate_ml_backend(m["backend_url"])
                 if ok:
                     questionary.print(f"✓ {msg}", style="fg:#00aa00")
                 else:
                     questionary.print(f"✗ {msg}  (that's too bad — continue)",
                                       style="fg:#cc4400")
-            ask_yn("Continue?", default=True)
-            preload = m
             continue
         if action == "edit":
-            preload = m
+            m_new = prompt_ml_backend(state, preload=m)
+            if m_new is not None:
+                m = m_new
             continue
 
 
@@ -1087,8 +1158,9 @@ def _add_one_ml(state: State) -> Optional[dict]:
 
 def step_annotations(state: State) -> None:
     describe(state, "annotations")
-    state.annotations["instructions"] = ask_text("instructions:", default="")
-    state.annotations["show_before_labeling"] = ask_yn("show_before_labeling?", default=False)
+    state.annotations["instructions"] = ask_text("annotations: instructions:", default="")
+    state.annotations["show_before_labeling"] = ask_yn(
+        "annotations: show_before_labeling?", default=False)
 
 
 # --- Write outputs ---------------------------------------------------------
@@ -1336,13 +1408,12 @@ def main() -> None:
     try:
         step_descriptions(state)
         step_config_dir(state)
-        step_auth_file(state)
         step_host(state)
+        step_auth_file(state)
         step_token(state)
         step_project_name(state)
         step_shortname(state)
         step_outfile(state)
-        step_new_auth_filename(state)
         step_label_config(state)
         step_general(state)
         step_lstools(state)

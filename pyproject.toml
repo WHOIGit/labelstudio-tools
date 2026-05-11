@@ -21,6 +21,7 @@ dependencies = [
     "python-dotenv",
     "tomli_w",
     "questionary",
+    "tabulate",
 ]
 
 keywords = ["labelstudio"]
