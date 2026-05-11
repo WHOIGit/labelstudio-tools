@@ -21,6 +21,9 @@ import questionary
 import requests
 import tomllib
 from PIL import ImageColor
+from prompt_toolkit import print_formatted_text
+from prompt_toolkit.formatted_text import FormattedText
+from tabulate import tabulate
 
 
 # --- Curated colors (hex + display name) ----------------------------------
@@ -78,7 +81,7 @@ FIELD_COMMENTS = {
     "bucket_prefix":"Prefix path within the bucket (optional).",
     "presigned_urls":"Generate presigned URLs for tasks.",
     "presigned_urls_expiry":"Presigned-URL expiry in minutes.",
-    "import_method":"'tasks' (JSON task files) or 'blobs' (raw media).",
+    "import_method":"'tasks' (tasks from json, jsonl, parquet files) or 'blobs' (tasks from media-files).",
     "file_name_filter":"Regex filter for filenames (default '(?!)' = none).",
     "scan_all_subfolders":"Recurse into subfolders.",
     "name":         "ML backend display name.",
@@ -598,8 +601,9 @@ def step_outfile(state: State) -> None:
 
 def step_label_config(state: State) -> None:
     describe(state, "label_config")
-    questionary.print("(this wizard does not validate XML — out of scope)",
-                      style="italic fg:#888888")
+    if not state.descriptions:
+        questionary.print("(this wizard does not validate XML — out of scope)",
+                          style="italic fg:#888888")
     xmls = sorted(state.config_dir.glob("*.xml"))
     MANUAL = "[enter .xml filename]"
     if xmls:
@@ -650,9 +654,6 @@ def step_general(state: State) -> None:
 def step_lstools(state: State) -> None:
     describe(state, "pk")
     state.pk = ask_text("Primary key field (pk):", default="image")
-    describe(state, "cache")
-    questionary.print("(cache: 'RAM' is the only option currently)",
-                      style="italic fg:#888888")
     state.cache = "RAM"
 
 
@@ -703,7 +704,10 @@ def collect_other_storages(state: State) -> list[dict]:
         if isinstance(storages, dict):
             storages = [storages]
         for s in storages:
-            out.append({"data": dict(s), "source": path.name})
+            s = dict(s)
+            if not _is_complete_storage_option(s):
+                continue
+            out.append({"data": s, "source": path.name})
     state._cache_other_storages = out
     return out
 
@@ -735,6 +739,15 @@ def _storage_key(d: dict) -> tuple:
             d.get("bucket_prefix", ""), d.get("mode", ""))
 
 
+def _is_complete_storage_option(d: dict) -> bool:
+    """Return true for project-storage entries usable as preload options."""
+    return (
+        _normalize_mode(str(d.get("mode", ""))) in ("source", "target")
+        and bool(d.get("bucket"))
+        and bool(d.get("endpoint_url"))
+    )
+
+
 def _dedupe_storage_options(items: list[dict]) -> list[dict]:
     """Group by connection signature; merge sources comma-delimited."""
     by_key: dict[tuple, dict] = {}
@@ -747,13 +760,68 @@ def _dedupe_storage_options(items: list[dict]) -> list[dict]:
     return list(by_key.values())
 
 
-def _format_storage_choice(item: dict) -> str:
-    d = item["data"]
-    sources = ", ".join(item["sources"])
-    return (f"{d.get('mode','?'):<6}  "
-            f"{d.get('endpoint_url','?')} / {d.get('bucket','?')}"
-            f"{('/' + d['bucket_prefix']) if d.get('bucket_prefix') else ''}"
-            f"  ({sources})")
+def _storage_auth_available(state: State, storage_cfg: dict) -> bool:
+    """Whether credentials are available inline or in the current auth data."""
+    if storage_cfg.get("aws_access_key_id") and storage_cfg.get("aws_secret_access_key"):
+        return True
+    for e in state.auth_data.get("storage", []):
+        if (e.get("type", "s3") == storage_cfg.get("type", "s3")
+                and e.get("bucket") == storage_cfg.get("bucket")
+                and e.get("endpoint_url") == storage_cfg.get("endpoint_url")
+                and e.get("aws_access_key_id")
+                and e.get("aws_secret_access_key")):
+            return True
+    return False
+
+
+def _format_storage_choices(state: State, items: list[dict]) -> list:
+    """Build a table-like questionary choice list with a header row."""
+    auth_marker = "__OK__"
+    rows = []
+    for idx, item in enumerate(items):
+        d = item["data"]
+        rows.append({
+            "idx": idx,
+            "mode": d.get("mode", "?"),
+            "endpoint": d.get("endpoint_url", ""),
+            "bucket": d.get("bucket", ""),
+            "prefix": d.get("bucket_prefix", ""),
+            "auth": auth_marker if _storage_auth_available(state, d) else "",
+            "source": ", ".join(item["sources"]),
+        })
+    table = tabulate(
+        [[r["mode"], r["endpoint"], r["bucket"], r["prefix"], r["auth"], r["source"]]
+         for r in rows],
+        headers=["Mode", "Endpoint", "Bucket", "Prefix", "Auth", "Source"],
+        tablefmt="plain",
+    )
+    lines = table.splitlines()
+    if not lines:
+        return []
+    choices = [
+        questionary.Separator(lines[0]),
+        questionary.Separator("-" * len(lines[0])),
+    ]
+    for row, line in zip(rows, lines[1:]):
+        if row["auth"]:
+            before, _, after = line.partition(row["auth"])
+            title = [
+                ("", before),
+                ("fg:#00aa00 bold", "✓"),
+                ("", " " * (len(auth_marker) - 1)),
+                ("", after),
+            ]
+        else:
+            title = line
+        choices.append(questionary.Choice(title=title, value=row["idx"]))
+    return choices
+
+
+def _print_kv(k: str, v: Any) -> None:
+    print_formatted_text(FormattedText([
+        ("fg:#00aa00", f"  {k}"),
+        ("", f" = {v!r}"),
+    ]))
 
 
 # --- Storage: prompts (manual / edit) --------------------------------------
@@ -811,10 +879,18 @@ def prompt_storage(state: State, preload: Optional[dict] = None) -> Optional[dic
         "presigned_urls_expiry (minutes):",
         default=str(s.get("presigned_urls_expiry", 15)),
         validate=lambda v: v.isdigit() or "must be a positive integer"))
-    s["import_method"] = ask_select(
+    import_method_choices = {
+        "tasks": "tasks (tasks from json, jsonl, parquet files)",
+        "blobs": "blobs (tasks from media-files)",
+    }
+    import_method_pick = ask_select(
         "import_method:",
-        choices=["tasks", "blobs"],
-        default=s.get("import_method", "tasks"))
+        choices=list(import_method_choices.values()),
+        default=import_method_choices.get(s.get("import_method", "tasks"),
+                                          import_method_choices["tasks"]))
+    s["import_method"] = next(
+        key for key, label in import_method_choices.items()
+        if label == import_method_pick)
     s["file_name_filter"] = ask_text(
         "file_name_filter (regex; default '(?!)' = none):",
         default=s.get("file_name_filter", "(?!)"))
@@ -831,7 +907,8 @@ def _auth_has_storage_creds(state: State, storage_cfg: dict) -> bool:
         if (e.get("type", "s3") == storage_cfg.get("type", "s3")
                 and e.get("bucket") == storage_cfg.get("bucket")
                 and e.get("endpoint_url") == storage_cfg.get("endpoint_url")
-                and e.get("aws_access_key_id")):
+                and e.get("aws_access_key_id")
+                and e.get("aws_secret_access_key")):
             return True
     return False
 
@@ -846,7 +923,7 @@ def _show_storage(s: dict) -> None:
             v = s[k]
             if k in ("aws_access_key_id", "aws_secret_access_key") and v:
                 v = v[:4] + "…" + v[-2:] if len(v) > 6 else "***"
-            questionary.print(f"  {k} = {v!r}")
+            _print_kv(k, v)
 
 
 # --- Storage loop ----------------------------------------------------------
@@ -871,22 +948,23 @@ def _add_one_storage(state: State) -> Optional[dict]:
     load = ask_yn("Load from other config / labelstudio?", default=False)
     s: Optional[dict] = None
     if load:
-        opts = _dedupe_storage_options(collect_other_storages(state))
-        ls_opts = _dedupe_storage_options(collect_ls_storages(state)) if state.token_works else []
+        with Spinner("loading storage options"):
+            opts = _dedupe_storage_options(collect_other_storages(state))
+            ls_opts = (_dedupe_storage_options(collect_ls_storages(state))
+                       if state.token_works else [])
         all_opts = opts + ls_opts
         if not all_opts:
             questionary.print("(no other storage entries available)", style="italic fg:#888888")
         else:
             CANCEL = "[cancel]"
-            choices = [_format_storage_choice(it) for it in all_opts] + [CANCEL]
+            choices = _format_storage_choices(state, all_opts) + [CANCEL]
             pick = ask_select("Pick a storage to preload:", choices=choices)
             if pick == CANCEL:
                 return None
             s = dict(STORAGE_DEFAULTS)
-            s.update(all_opts[choices.index(pick)]["data"])
+            s.update(all_opts[pick]["data"])
             # Warn if no creds available (neither inline in source nor in selected auth).
-            from_inline_keys = bool(s.get("aws_access_key_id"))
-            if not from_inline_keys and not _auth_has_storage_creds(state, s):
+            if not _storage_auth_available(state, s):
                 questionary.print(
                     "WARNING: this storage has no credentials in the source config "
                     "or the selected auth file.", style="fg:#ff8800")
@@ -978,10 +1056,14 @@ def collect_other_ml(state: State) -> list[dict]:
             continue
         ml = data.get("ml_backend")
         if isinstance(ml, dict):
-            out.append({"data": dict(ml), "source": path.name})
+            ml = dict(ml)
+            if _is_complete_ml_option(ml):
+                out.append({"data": ml, "source": path.name})
         elif isinstance(ml, list):
             for entry in ml:
-                out.append({"data": dict(entry), "source": path.name})
+                entry = dict(entry)
+                if _is_complete_ml_option(entry):
+                    out.append({"data": entry, "source": path.name})
     state._cache_other_ml = out
     return out
 
@@ -1029,6 +1111,10 @@ def _ml_key(d: dict) -> tuple:
     return (d.get("backend_url", ""), d.get("name", ""))
 
 
+def _is_complete_ml_option(d: dict) -> bool:
+    return bool(d.get("backend_url"))
+
+
 def _dedupe_ml_options(items: list[dict]) -> list[dict]:
     by_key: dict[tuple, dict] = {}
     for it in items:
@@ -1040,10 +1126,56 @@ def _dedupe_ml_options(items: list[dict]) -> list[dict]:
     return list(by_key.values())
 
 
-def _format_ml_choice(item: dict) -> str:
-    d = item["data"]
-    sources = ", ".join(item["sources"])
-    return f"{d.get('name','(unnamed)'):<24} {d.get('backend_url','?')}  ({sources})"
+def _ml_auth_available(state: State, ml_cfg: dict) -> bool:
+    if ml_cfg.get("user") and ml_cfg.get("pass"):
+        return True
+    name = ml_cfg.get("name")
+    backend_url = ml_cfg.get("backend_url")
+    for e in state.auth_data.get("ml_backend", []):
+        if (name and e.get("name") == name) or (
+                backend_url and e.get("backend_url") == backend_url):
+            return bool(e.get("user") and e.get("pass"))
+    return False
+
+
+def _format_ml_choices(state: State, items: list[dict]) -> list:
+    auth_marker = "__OK__"
+    rows = []
+    for idx, item in enumerate(items):
+        d = item["data"]
+        rows.append({
+            "idx": idx,
+            "name": d.get("name") or "(unnamed)",
+            "backend_url": d.get("backend_url", ""),
+            "auth": auth_marker if _ml_auth_available(state, d) else "",
+            "source": ", ".join(item["sources"]),
+        })
+    table = tabulate(
+        [[r["name"], r["backend_url"], r["auth"], r["source"]]
+         for r in rows],
+        headers=["Name", "Backend URL", "Auth", "Source"],
+        tablefmt="plain",
+    )
+    lines = table.splitlines()
+    if not lines:
+        return []
+    choices = [
+        questionary.Separator(lines[0]),
+        questionary.Separator("-" * len(lines[0])),
+    ]
+    for row, line in zip(rows, lines[1:]):
+        if row["auth"]:
+            before, _, after = line.partition(row["auth"])
+            title = [
+                ("", before),
+                ("fg:#00aa00 bold", "✓"),
+                ("", " " * (len(auth_marker) - 1)),
+                ("", after),
+            ]
+        else:
+            title = line
+        choices.append(questionary.Choice(title=title, value=row["idx"]))
+    return choices
 
 
 def prompt_ml_backend(state: State, preload: Optional[dict] = None) -> Optional[dict]:
@@ -1084,41 +1216,37 @@ def _show_ml(m: dict) -> None:
     for k in ("name", "backend_url", "interactive", "extra_params",
               "start_training_on_annotation_update", "annotation_prelabeling"):
         if k in m:
-            questionary.print(f"  {k} = {m[k]!r}")
+            _print_kv(k, m[k])
 
 
 def step_ml_loop(state: State) -> None:
     describe(state, "ml_backend")
-    while True:
-        more = ask_yn(
-            ("Add another ml-backend?" if state.ml_backends else "Add ml-backend?"),
-            default=not state.ml_backends,
-        )
-        if not more:
-            return
-        m = _add_one_ml(state)
-        if m is None:
-            continue
-        state.ml_backends.append(m)
+    if not ask_yn("Add ml-backend?", default=True):
+        return
+    m = _add_one_ml(state)
+    if m is not None:
+        state.ml_backends = [m]
 
 
 def _add_one_ml(state: State) -> Optional[dict]:
     load = ask_yn("Load from other config / labelstudio?", default=True)
     m: Optional[dict] = None
     if load:
-        opts = _dedupe_ml_options(collect_other_ml(state))
-        ls_opts = _dedupe_ml_options(collect_ls_ml(state)) if state.token_works else []
+        with Spinner("loading ml-backend options"):
+            opts = _dedupe_ml_options(collect_other_ml(state))
+            ls_opts = (_dedupe_ml_options(collect_ls_ml(state))
+                       if state.token_works else [])
         all_opts = opts + ls_opts
         if not all_opts:
             questionary.print("(no other ml backends available)", style="italic fg:#888888")
         else:
             CANCEL = "[cancel]"
-            choices = [_format_ml_choice(it) for it in all_opts] + [CANCEL]
+            choices = _format_ml_choices(state, all_opts) + [CANCEL]
             pick = ask_select("Pick an ml-backend to preload:", choices=choices)
             if pick == CANCEL:
                 return None
             m = dict(ML_DEFAULTS)
-            m.update(all_opts[choices.index(pick)]["data"])
+            m.update(all_opts[pick]["data"])
     if m is None:
         m = prompt_ml_backend(state)
         if m is None:
@@ -1158,7 +1286,7 @@ def _add_one_ml(state: State) -> Optional[dict]:
 
 def step_annotations(state: State) -> None:
     describe(state, "annotations")
-    state.annotations["instructions"] = ask_text("annotations: instructions:", default="")
+    state.annotations["instructions"] = ask_text("annotation instructions text:", default="")
     state.annotations["show_before_labeling"] = ask_yn(
         "annotations: show_before_labeling?", default=False)
 
@@ -1210,7 +1338,7 @@ def write_project_config(state: State) -> None:
             if k not in seen:
                 b.kv(k, v)
 
-    for m in state.ml_backends:
+    for m in state.ml_backends[:1]:
         b.section("ml_backend")
         order = ["name", "backend_url", "interactive", "extra_params",
                  "start_training_on_annotation_update", "annotation_prelabeling"]
