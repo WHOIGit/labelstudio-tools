@@ -1,13 +1,15 @@
 """Interactive wizard for creating a new Label-Studio project config (TOML).
 
 Run with:
-    python -m labelstudio_tools.config_wizard [-v] [--dir DIR] [--auth FILE] [-o OUT]
+    python -m labelstudio_tools.config_wizard auth [--default] [...]
+    python -m labelstudio_tools.config_wizard project [...]
 
 Always writes a NEW project config (warns before overwriting). For editing an
 existing config, just open the .toml file in an editor.
 """
 import argparse
 import itertools
+import os
 import re
 import sys
 import threading
@@ -375,8 +377,8 @@ def step_descriptions(state: State) -> None:
 
 def step_config_dir(state: State) -> None:
     describe(state, "config_dir")
-    if state.args.dir:
-        state.config_dir = Path(state.args.dir).resolve()
+    if state.args.config_dir:
+        state.config_dir = Path(state.args.config_dir).resolve()
     else:
         d = ask_text("Config directory:", default="./configs/")
         state.config_dir = Path(d).resolve()
@@ -590,7 +592,7 @@ def step_outfile(state: State) -> None:
     default = f"ls_project.{state.shortname}.toml"
     if state.args.outfile:
         # CLI override: bare name → config_dir; with a path → cwd-relative.
-        # If --dir was also given, bare names go in --dir.
+        # If --config-dir was also given, bare names go in --config-dir.
         state.outfile = _resolve_outfile(state.args.outfile, state.config_dir)
     else:
         v = ask_text("Output filename:", default=default)
@@ -1404,18 +1406,30 @@ def _maybe_comment(verbose: bool, key: str) -> Optional[str]:
     return FIELD_COMMENTS.get(key) if verbose else None
 
 
-def write_default_project(path: Path, auth_rel: str, verbose: bool) -> None:
+def write_default_project(path: Path, auth_rel: str = "", verbose: bool = False,
+                          inline: bool = False) -> None:
     b = TomlBuilder()
-    b.header_comment(
-        "Stub Label Studio project config.\n"
-        "Strictly required: host, label_config, and a valid token (in the auth\n"
-        "file or inline). Anything else can be removed if not needed —\n"
-        "including the entire [[storage]], [ml_backend], and [annotations]\n"
-        "sections.")
+    if inline:
+        b.header_comment(
+            "Stub Label Studio project config with inline secrets.\n"
+            "Keep this file out of version control. Strictly required: host,\n"
+            "label_config, and token. Anything else can be removed if not\n"
+            "needed — including the entire [[storage]], [ml_backend], and\n"
+            "[annotations] sections.")
+    else:
+        b.header_comment(
+            "Stub Label Studio project config.\n"
+            "Strictly required: host, label_config, and a valid token (in the auth\n"
+            "file or inline). Anything else can be removed if not needed —\n"
+            "including the entire [[storage]], [ml_backend], and [annotations]\n"
+            "sections.")
     b.kv("host", "", _maybe_comment(verbose, "host"))
     b.kv("project", "", _maybe_comment(verbose, "project"))
     b.kv("label_config", "", _maybe_comment(verbose, "label_config"))
-    b.kv("auth", auth_rel, _maybe_comment(verbose, "auth"))
+    if inline:
+        b.kv("token", "", _maybe_comment(verbose, "token"))
+    else:
+        b.kv("auth", auth_rel, _maybe_comment(verbose, "auth"))
 
     b.section("labelstudio-tools")
     b.kv("pk", "image", _maybe_comment(verbose, "pk"))
@@ -1438,6 +1452,9 @@ def write_default_project(path: Path, auth_rel: str, verbose: bool) -> None:
     b.kv("import_method", "tasks", _maybe_comment(verbose, "import_method"))
     b.kv("file_name_filter", "(?!)", _maybe_comment(verbose, "file_name_filter"))
     b.kv("scan_all_subfolders", True, _maybe_comment(verbose, "scan_all_subfolders"))
+    if inline:
+        b.kv("aws_access_key_id", "", _maybe_comment(verbose, "aws_access_key_id"))
+        b.kv("aws_secret_access_key", "", _maybe_comment(verbose, "aws_secret_access_key"))
 
     b.section("ml_backend")
     b.kv("name", "", _maybe_comment(verbose, "name"))
@@ -1448,6 +1465,9 @@ def write_default_project(path: Path, auth_rel: str, verbose: bool) -> None:
          _maybe_comment(verbose, "start_training_on_annotation_update"))
     b.kv("annotation_prelabeling", False,
          _maybe_comment(verbose, "annotation_prelabeling"))
+    if inline:
+        b.kv("user", "", _maybe_comment(verbose, "user"))
+        b.kv("pass", "", _maybe_comment(verbose, "pass"))
 
     b.section("annotations")
     b.kv("instructions", "", _maybe_comment(verbose, "instructions"))
@@ -1485,52 +1505,110 @@ def write_default_auth(path: Path, verbose: bool) -> None:
     path.write_text(b.render())
 
 
-def run_default_mode(args: argparse.Namespace) -> None:
-    config_dir = Path(args.dir).resolve() if args.dir else Path("./configs").resolve()
+def _default_config_dir(args: argparse.Namespace) -> Path:
+    return Path(args.config_dir or "./configs").resolve()
+
+
+def _refuse_overwrite(path: Path) -> None:
+    if path.exists():
+        print(f"ERROR: {path} already exists; refusing to overwrite.", file=sys.stderr)
+        sys.exit(1)
+
+
+def run_auth_default_mode(args: argparse.Namespace) -> None:
+    config_dir = _default_config_dir(args)
     config_dir.mkdir(parents=True, exist_ok=True)
-
-    proj_name = args.outfile or "ls_project.toml"
-    auth_name = args.auth or "ls_auth.toml"
-    proj_path = _resolve_outfile(proj_name, config_dir)
+    auth_name = args.outfile or "ls_auth.toml"
     auth_path = _resolve_outfile(auth_name, config_dir)
-
-    for p in (proj_path, auth_path):
-        if p.exists():
-            print(f"ERROR: {p} already exists; refusing to overwrite.", file=sys.stderr)
-            sys.exit(1)
-
-    auth_rel = auth_path_for_project(auth_path, proj_path.parent)
-    write_default_project(proj_path, auth_rel, verbose=args.verbose)
+    _refuse_overwrite(auth_path)
     write_default_auth(auth_path, verbose=args.verbose)
-    print(f"Wrote {proj_path}")
     print(f"Wrote {auth_path}")
+
+
+def run_project_default_mode(args: argparse.Namespace, *, inline: bool = False) -> None:
+    config_dir = _default_config_dir(args)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    proj_name = args.outfile or "ls_project.toml"
+    proj_path = _resolve_outfile(proj_name, config_dir)
+    _refuse_overwrite(proj_path)
+    auth_rel = ""
+    if not inline:
+        auth_path = _resolve_outfile(args.auth or "ls_auth.toml", config_dir)
+        auth_rel = auth_path_for_project(auth_path, proj_path.parent)
+    write_default_project(proj_path, auth_rel, verbose=args.verbose, inline=inline)
+    print(f"Wrote {proj_path}")
 
 
 # --- Main ------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="labelstudio-tools config-wizard",
-                                description="Interactive wizard for a new LS project config (TOML).")
+def _add_common_wizard_args(p: argparse.ArgumentParser, *,
+                            outfile_help: str) -> None:
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Show field descriptions (skips the y/n prompt; "
-                        "with --default, adds inline field-description comments).")
-    p.add_argument("--dir", help="Pre-select config directory (skips prompt). "
-                                  "Default for --default: ./configs/.")
-    p.add_argument("--auth", help="Pre-select auth file (skips prompt). "
-                                   "With --default: overrides default auth filename.")
-    p.add_argument("-o", "--outfile",
-                   help="Pre-set output filename. Bare name → goes in --dir; "
-                        "with path → cwd-relative.")
-    p.add_argument("--default", action="store_true",
-                   help="Skip the wizard; write a stub project config (ls_project.toml) "
-                        "and auth file (ls_auth.toml) into --dir.")
-    return p.parse_args()
+                        "with default modes, adds inline field-description comments).")
+    p.add_argument("--config-dir",
+                   help="Pre-select config directory. Defaults to LSTOOL_CONFIG_DIR "
+                        "or ./configs.")
+    p.add_argument("-o", "--outfile", help=outfile_help)
+
+
+def _apply_env_presets(args: argparse.Namespace) -> argparse.Namespace:
+    if args.config_dir is None:
+        args.config_dir = os.environ.get("LSTOOL_CONFIG_DIR")
+    if args.section == "auth":
+        if args.outfile is None:
+            args.outfile = os.environ.get("LSTOOL_CONFIG_AUTH")
+    elif args.section == "project":
+        if args.outfile is None:
+            args.outfile = os.environ.get("LSTOOL_CONFIG")
+        if args.auth is None:
+            args.auth = os.environ.get("LSTOOL_CONFIG_AUTH")
+    return args
+
+
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="labelstudio_tools.config_wizard",
+        description="Interactive config wizards for Label Studio tools.")
+    sub = p.add_subparsers(dest="section", required=True)
+
+    auth_wizard = sub.add_parser("auth", help="Scaffold an auth config.")
+    auth_wizard.set_defaults(section="auth")
+    auth_wizard.add_argument("--default", action="store_true",
+                             help="Write a stub auth config and exit.")
+    _add_common_wizard_args(
+        auth_wizard,
+        outfile_help="Auth output filename. Bare name goes in --config-dir.")
+
+    project_wizard = sub.add_parser(
+        "project", help="Scaffold or interactively build a project config.")
+    project_wizard.set_defaults(section="project")
+    defaults = project_wizard.add_mutually_exclusive_group()
+    defaults.add_argument("--default", action="store_true",
+                          help="Write a stub project config and exit.")
+    defaults.add_argument("--default-inline", action="store_true",
+                          help="Write a stub project config with inline secrets and exit.")
+    project_wizard.add_argument("--auth",
+                                help="Pre-select auth file for project configs.")
+    _add_common_wizard_args(
+        project_wizard,
+        outfile_help="Project output filename. Bare name goes in --config-dir.")
+
+    return _apply_env_presets(p.parse_args(argv))
 
 
 def main() -> None:
     args = parse_args()
+    if args.section == "auth":
+        if args.default:
+            run_auth_default_mode(args)
+            return
+        raise NotImplementedError("interactive auth wizard is not implemented")
     if args.default:
-        run_default_mode(args)
+        run_project_default_mode(args)
+        return
+    if args.default_inline:
+        run_project_default_mode(args, inline=True)
         return
     state = State(args=args)
     try:

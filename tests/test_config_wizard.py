@@ -1,5 +1,6 @@
 from argparse import Namespace
 
+import pytest
 import questionary
 
 from labelstudio_tools import config_wizard as cw
@@ -7,7 +8,8 @@ from labelstudio_tools import config_wizard as cw
 
 def _state(tmp_path):
     state = cw.State(
-        args=Namespace(verbose=False, dir=None, auth=None, outfile=None, default=False)
+        args=Namespace(verbose=False, config_dir=None, auth=None, outfile=None,
+                       default=False, default_inline=False)
     )
     state.config_dir = tmp_path
     state.outfile = tmp_path / "ls_project.new.toml"
@@ -194,3 +196,77 @@ def test_step_annotations_uses_clear_instruction_prompt(monkeypatch, tmp_path):
 
     assert prompts == ["annotation instructions text:"]
     assert state.annotations["instructions"] == "instructions"
+
+
+def test_auth_default_writes_only_auth_file(tmp_path):
+    args = Namespace(config_dir=str(tmp_path), outfile=None, verbose=False)
+
+    cw.run_auth_default_mode(args)
+
+    assert (tmp_path / "ls_auth.toml").is_file()
+    assert not (tmp_path / "ls_project.toml").exists()
+
+
+def test_project_default_writes_only_project_file_referencing_auth(tmp_path):
+    args = Namespace(config_dir=str(tmp_path), outfile=None, auth=None, verbose=False)
+
+    cw.run_project_default_mode(args)
+    rendered = (tmp_path / "ls_project.toml").read_text()
+
+    assert (tmp_path / "ls_project.toml").is_file()
+    assert not (tmp_path / "ls_auth.toml").exists()
+    assert 'auth = "ls_auth.toml"' in rendered
+    assert '\ntoken = ""' not in rendered
+
+
+def test_project_default_inline_writes_inline_secret_placeholders(tmp_path):
+    args = Namespace(config_dir=str(tmp_path), outfile=None, auth=None, verbose=False)
+
+    cw.run_project_default_mode(args, inline=True)
+    rendered = (tmp_path / "ls_project.toml").read_text()
+
+    assert '\nauth = ' not in rendered
+    assert 'token = ""' in rendered
+    assert 'aws_access_key_id = ""' in rendered
+    assert 'aws_secret_access_key = ""' in rendered
+    assert 'user = ""' in rendered
+    assert 'pass = ""' in rendered
+
+
+def test_auth_wizard_without_default_is_not_implemented(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["config_wizard.py", "auth"])
+
+    with pytest.raises(NotImplementedError):
+        cw.main()
+
+
+def test_parse_args_uses_env_presets(monkeypatch):
+    monkeypatch.setenv("LSTOOL_CONFIG_DIR", "/env/configs")
+    monkeypatch.setenv("LSTOOL_CONFIG", "env_project.toml")
+    monkeypatch.setenv("LSTOOL_CONFIG_AUTH", "env_auth.toml")
+
+    project_args = cw.parse_args(["project"])
+    auth_args = cw.parse_args(["auth", "--default"])
+
+    assert project_args.config_dir == "/env/configs"
+    assert project_args.outfile == "env_project.toml"
+    assert project_args.auth == "env_auth.toml"
+    assert auth_args.config_dir == "/env/configs"
+    assert auth_args.outfile == "env_auth.toml"
+
+
+def test_parse_args_explicit_flags_override_env_presets(monkeypatch):
+    monkeypatch.setenv("LSTOOL_CONFIG_DIR", "/env/configs")
+    monkeypatch.setenv("LSTOOL_CONFIG", "env_project.toml")
+    monkeypatch.setenv("LSTOOL_CONFIG_AUTH", "env_auth.toml")
+
+    args = cw.parse_args([
+        "project",
+        "--config-dir", "/explicit/configs",
+        "--auth", "explicit_auth.toml",
+        "-o", "explicit_project.toml",
+    ])
+
+    assert args.config_dir == "/explicit/configs"
+    assert args.auth == "explicit_auth.toml"
+    assert args.outfile == "explicit_project.toml"

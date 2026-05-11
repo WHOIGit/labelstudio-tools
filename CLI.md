@@ -188,7 +188,7 @@ into `--config-dir`. `--verbose` adds inline field-description comments.
 Without `--default` → currently raises `NotImplementedError` (interactive
 auth-only wizard is a stub).
 
-`--config-dir` defaults to `./config` only when `LSTOOL_CONFIG_DIR` is
+`--config-dir` defaults to `./configs` only when `LSTOOL_CONFIG_DIR` is
 unset; a `--config-dir` flag value always overrides the env var. `-o` is
 the auth-file basename within `--config-dir` (or an absolute path
 elsewhere). `LSTOOL_CONFIG_AUTH` presets the `-o` default.
@@ -234,7 +234,7 @@ Default modes (mutually exclusive — skip the wizard entirely):
 - `--default-inline` → writes a single `ls_project.toml` with secrets
   embedded inline (no separate auth file).
 
-`--config-dir` (renamed from the old `--dir`) defaults to `./config` only
+`--config-dir` defaults to `./configs` only
 when `LSTOOL_CONFIG_DIR` is unset; a `--config-dir` flag value always
 overrides the env var.
 
