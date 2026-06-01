@@ -127,7 +127,9 @@ class TaskManager:
                 raise ValueError(
                     "Multiple storages in config; set "
                     "`labelstudio-tools.storage_title` to disambiguate")
-            s3_config = storage_to_s3_config(entry)
+            s3_config = storage_to_s3_config(
+                entry,
+                s3_https_suppress=bool(tools.get('s3_https_suppress', False)))
 
         return cls(host=merged['host'], token=merged['token'],
                    project=project, pk=tools.get('pk'),

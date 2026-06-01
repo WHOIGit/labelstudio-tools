@@ -87,8 +87,16 @@ def find_storage(merged: dict, *, bucket: str = None, title: str = None,
     return matches[0]
 
 
-def storage_to_s3_config(storage: dict) -> dict:
-    """Extract s3-client kwargs from a (auth-merged) storage entry."""
+def storage_to_s3_config(storage: dict, *, s3_https_suppress: bool = False) -> dict:
+    """Extract s3-client kwargs from a (auth-merged) storage entry.
+
+    If ``s3_https_suppress`` is True, any ``https://`` prefix on ``endpoint_url``
+    is rewritten to ``http://`` for the boto3 client only. The LS-server-facing
+    ``_storage_kwargs`` path is unaffected. Useful when the LS server requires
+    HTTPS to reach the S3 endpoint but the local boto3 client can only reach
+    it over HTTP. Source of the flag is the project config's
+    ``[labelstudio-tools]`` section (see :func:`tool_section`).
+    """
     out = {}
     field_map = {
         'bucket': 'bucket',
@@ -101,6 +109,9 @@ def storage_to_s3_config(storage: dict) -> dict:
     for src, dst in field_map.items():
         if storage.get(src) is not None:
             out[dst] = storage[src]
+    if s3_https_suppress and isinstance(out.get('endpoint_url'), str):
+        if out['endpoint_url'].startswith('https://'):
+            out['endpoint_url'] = 'http://' + out['endpoint_url'][len('https://'):]
     return out
 
 
